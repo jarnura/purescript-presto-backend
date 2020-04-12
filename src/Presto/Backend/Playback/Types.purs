@@ -60,18 +60,23 @@ newtype Recording = Recording RecordingEntries
 
 type RecorderRuntime =
   { flowGUID            :: String
+  , parseqGUID          :: String
   , recordingVar        :: AVar RecordingEntries
   , forkedRecordingsVar :: AVar (StrMap.StrMap (AVar RecordingEntries))
+  , parSeqRecordingsVar :: AVar (StrMap.StrMap (AVar RecordingEntries))
   , disableEntries      :: Array DisableEntries
   }
 
 type PlayerRuntime =
   { flowGUID               :: String
+  , parseqGUID             :: String
   , recording              :: RecordingEntries
   , stepVar                :: AVar Int
   , errorVar               :: AVar (Maybe PlaybackError)
   , forkedFlowRecordings   :: StrMap.StrMap RecordingEntries
   , forkedFlowErrorsVar    :: AVar (StrMap.StrMap PlaybackError)
+  , parSeqRecordings       :: StrMap.StrMap RecordingEntries
+  , parSeqErrorsVar        :: AVar (StrMap.StrMap PlaybackError)
   , disableVerify          :: Array DisableEntries
   , disableMocking         :: Array DisableEntries
   , skipEntries            :: Array DisableEntries

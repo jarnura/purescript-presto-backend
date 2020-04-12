@@ -29,6 +29,7 @@ import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Exception (Error)
 import Control.Monad.Except (runExcept)
 import Control.Monad.Free (Free, liftF)
+import Control.Parallel (parSequence)
 import Data.Either (Either(..))
 import Data.Exists (Exists, mkExists)
 import Data.Foreign (Foreign, toForeign)
@@ -98,6 +99,7 @@ data BackendFlowCommands next st rt s
         (String -> next)
 
     | ParSequence (Array (BackendFlow st rt s))
+        String
         (Playback.RRItemDict Playback.ParSequenceEntry (Array (EitherEx ParError s)))
         (Array (EitherEx ParError s) → next)
 
@@ -265,16 +267,27 @@ forkFlow' description flow = do
 forkFlow :: forall st rt a. BackendFlow st rt a -> BackendFlow st rt Unit
 forkFlow = forkFlow' ""
 
+parSequence' :: ∀ st rt a.
+  Encode a
+  => Decode a
+  => String
+  -> Array (BackendFlow st rt a)   
+  → BackendFlow st rt (Array (EitherEx ParError a))
+parSequence' description tbf = do
+  parGUID <- generateGUID' description
+  void $ log "parSequence" $ "Desciption : " <> description <> "parGUID : " <> parGUID
+  wrap $ ParSequence 
+                  tbf
+                  parGUID
+                  (Playback.mkEntryDict "Parsequence" $ Playback.mkParSequenceEntry description)
+                  id
+
 parSequence :: ∀ st rt a.
   Encode a
   => Decode a
   => Array (BackendFlow st rt a)   
   → BackendFlow st rt (Array (EitherEx ParError a))
-parSequence tbf = wrap $ ParSequence 
-                  tbf 
-                  (Playback.mkEntryDict "Parsequence" Playback.mkParSequenceEntry)
-                  id
-
+parSequence tbf = parSequence' "" tbf
 
 runSysCmd :: forall st rt. String -> BackendFlow st rt String
 runSysCmd cmd =

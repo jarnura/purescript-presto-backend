@@ -115,7 +115,8 @@ data RunKVDBSimpleEntry = RunKVDBSimpleEntry
   , jsonResult :: Foreign
   }
 data ParSequenceEntry = ParSequenceEntry
-  { jsonResult  :: Array (EitherEx ParError Foreign)
+  { description :: String
+  , jsonResult  :: Array (EitherEx ParError Foreign)
   }
 
 mkSetOptionEntry :: String -> String -> UnitEx -> SetOptionEntry
@@ -160,10 +161,12 @@ mkParSequenceEntry
   :: forall b
     . Encode b
   => Decode b
-  => Array (EitherEx ParError b)
+  => String
+  -> Array (EitherEx ParError b)
   -> ParSequenceEntry
-mkParSequenceEntry output = ParSequenceEntry
-  { jsonResult : encode <$$> output
+mkParSequenceEntry desp output = ParSequenceEntry
+  {  description : desp
+  ,  jsonResult : encode <$$> output
   }
 
 

@@ -1,6 +1,9 @@
 module Presto.Backend.RunModesSpec where
 
-import Control.Monad.Aff (Aff)
+import Data.Ord
+import Prelude
+
+import Control.Monad.Aff (Aff, Milliseconds(..), delay)
 import Control.Monad.Aff.AVar (AVAR, AVar, makeVar, readVar)
 import Control.Monad.Aff.Class (liftAff)
 import Control.Monad.Eff.Exception (error, message)
@@ -8,21 +11,25 @@ import Control.Monad.Error.Class (throwError)
 import Control.Monad.Except.Trans (runExceptT)
 import Control.Monad.Reader.Trans (runReaderT)
 import Control.Monad.State.Trans (runStateT)
-import Data.Array (length, index)
+import Data.Array (cons, head, index, last, length)
 import Data.Either (Either(Left, Right), isRight)
 import Data.Foreign (Foreign, F)
 import Data.Foreign.Class (class Decode, class Encode)
 import Data.Foreign.Generic (encodeJSON, decodeJSON)
+import Data.Foreign.Generic.EnumEncoding (class GenericDecodeEnum, class GenericEncodeEnum, genericDecodeEnum, genericEncodeEnum)
 import Data.Generic.Rep (class Generic)
 import Data.Generic.Rep.Show as GShow
-import Data.Maybe (Maybe(Nothing, Just))
+import Data.Int (toNumber)
+import Data.Maybe (Maybe(Nothing, Just), isNothing)
 import Data.StrMap as StrMap
-import Data.Tuple (Tuple(..))
 import Data.Traversable (traverse)
+import Data.Tuple (Tuple(..), fst)
 import Debug.Trace (spy)
 import Prelude (class Eq, class Show, Unit, (<$>), bind, discard, pure, show, unit, ($), (*>), (<>), (==), id)
-import Presto.Backend.Flow (BackendFlow, getOption, setOption, forkFlow, forkFlow', generateGUID, generateGUID', callAPI, doAffRR, getDBConn, log, runSysCmd, throwException)
+import Presto.Backend.Flow (BackendFlow, callAPI, doAff, doAffRR, doAffRR', forkFlow, forkFlow', generateGUID, generateGUID', getDBConn, getOption, log, parSequence, runSysCmd, setOption, throwException)
+import Presto.Backend.Language.Types (EitherEx(..), UnitEx(..))
 import Presto.Backend.Language.Types.DB (MockedSqlConn(MockedSqlConn), SqlConn(MockedSql))
+import Presto.Backend.Language.Types.ParSequence (ParError(..))
 import Presto.Backend.Playback.Entries (CallAPIEntry(..), DoAffEntry(..), LogEntry(..), RunSysCmdEntry(..))
 import Presto.Backend.Playback.Types (RecordingEntries, EntryReplayingMode(..), GlobalReplayingMode(..), PlaybackError(..), PlaybackErrorType(..), RecordingEntry(..))
 import Presto.Backend.Runtime.Interpreter (RunningMode(..), runBackend)
@@ -31,9 +38,7 @@ import Presto.Backend.Types.API (class RestEndpoint, APIResult, Request(..), Hea
 import Presto.Backend.Types.Options (class OptionEntity)
 import Presto.Core.Utils.Encoding (defaultEncode, defaultDecode)
 import Test.Spec (Spec, describe, it)
-import Test.Spec.Assertions (shouldEqual, fail)
-import Data.Foreign.Generic.EnumEncoding (class GenericDecodeEnum, class GenericEncodeEnum, genericDecodeEnum, genericEncodeEnum)
-import Data.Ord
+import Test.Spec.Assertions (fail, shouldEqual)
 
 defaultEnumDecode :: forall a b. Generic a b => GenericDecodeEnum b => Foreign -> F a
 defaultEnumDecode x = genericDecodeEnum { constructorTagTransform: id } x
@@ -165,7 +170,7 @@ logAndCallAPIScript = do
 logAndCallAPIScript' :: BackendFlow Unit Unit (Tuple (APIResult SomeResponse) (APIResult SomeResponse))
 logAndCallAPIScript' = do
   logScript'
-  callAPIScript'
+  callAPIScript
 
 runSysCmdScript :: BackendFlow Unit Unit String
 runSysCmdScript = runSysCmd "echo 'ABC'"
@@ -242,6 +247,22 @@ setOptionScript = do
   setOption (GatewayKey  "explicitGWC") GwC
   getOption $ GatewayKey "explicitGWC"
 
+
+parFlow :: Int -> Number -> BackendFlow Unit Unit Int
+parFlow val t = do 
+  _ <- log "" $ "Before Timer" <> show  val
+  _ <- doAffRR' "delay" (delay (Milliseconds t ) *> pure UnitEx)
+  _ <- log "Value : " val
+  _ <- log "" $ "After Timer" <> show val
+  pure val
+
+parSequenceScript :: BackendFlow Unit Unit (Array (EitherEx ParError Int))
+parSequenceScript = do
+  bind getBfArray parSequence 
+
+  where
+    getBfArray = pure $ [(parFlow 5 0.0 ) , (parFlow 2 100.0 ),(parFlow 1 500.0) , (parFlow 3 800.0)] -- , (parFlow 2), (parFlow 3)]
+
 mkBackendRuntime :: AVar (StrMap.StrMap String) -> KVDBRuntime -> RunningMode -> BackendRuntime
 mkBackendRuntime options kvdbRuntime mode = BackendRuntime
   { apiRunner
@@ -288,13 +309,40 @@ createRecordingBackendRuntimeForked = do
   recordingVar <- makeVar []
   options <- mkOptions
   forkedRecordingsVar <- makeVar StrMap.empty
+  parSeqRecordingsVar <- makeVar StrMap.empty
   let brt = mkBackendRuntime options kvdbRuntime $ RecordingMode
         { flowGUID : ""
+        , parseqGUID : ""
         , recordingVar
         , forkedRecordingsVar
+        , parSeqRecordingsVar
         , disableEntries : []
         }
   pure { brt, recordingVar, forkedRecordingsVar }
+
+
+createRecordingBackendRuntimeParseq
+  :: forall eff
+   . Aff ( avar :: AVAR | eff )
+      { brt :: BackendRuntime
+      , recordingVar :: AVar RecordingEntries
+      , parSeqRecordingsVar :: AVar (StrMap.StrMap (AVar RecordingEntries))
+      }
+createRecordingBackendRuntimeParseq = do
+  kvdbRuntime  <- createKVDBRuntime
+  recordingVar <- makeVar []
+  options <- mkOptions
+  forkedRecordingsVar <- makeVar StrMap.empty
+  parSeqRecordingsVar <- makeVar StrMap.empty
+  let brt = mkBackendRuntime options kvdbRuntime $ RecordingMode
+        { flowGUID : ""
+        , parseqGUID : ""
+        , recordingVar
+        , forkedRecordingsVar
+        , parSeqRecordingsVar
+        , disableEntries : []
+        }
+  pure { brt, recordingVar, parSeqRecordingsVar }
 
 createRecordingBackendRuntime
   :: forall eff
@@ -303,11 +351,14 @@ createRecordingBackendRuntime = do
   kvdbRuntime  <- createKVDBRuntime
   recordingVar <- makeVar []
   forkedRecordingsVar <- makeVar StrMap.empty
+  parSeqRecordingsVar <- makeVar StrMap.empty
   options <- mkOptions
   let brt = mkBackendRuntime options kvdbRuntime $ RecordingMode
         { flowGUID : ""
+        , parseqGUID : ""
         , recordingVar
         , forkedRecordingsVar
+        , parSeqRecordingsVar
         , disableEntries : []
         }
   pure $ Tuple brt recordingVar
@@ -316,11 +367,14 @@ createRecordingBackendRuntimeWithMode entries  = do
     kvdbRuntime <- createKVDBRuntime
     recordingVar <- makeVar []
     forkedRecordingsVar <- makeVar StrMap.empty
+    parSeqRecordingsVar <- makeVar StrMap.empty
     options <- mkOptions
     let brt = mkBackendRuntime options kvdbRuntime $ RecordingMode
           { flowGUID : ""
+          , parseqGUID : ""
           , recordingVar
           , forkedRecordingsVar
+          , parSeqRecordingsVar
           , disableEntries : entries
           }
     pure $ Tuple brt recordingVar
@@ -329,11 +383,14 @@ createRecordingBackendRuntimeWithEntryMode entryMode = do
   kvdbRuntime  <- createKVDBRuntime
   recordingVar <- makeVar entryMode
   forkedRecordingsVar <- makeVar StrMap.empty
+  parSeqRecordingsVar <- makeVar StrMap.empty
   options <- mkOptions
   let brt = mkBackendRuntime options kvdbRuntime $ RecordingMode
         { flowGUID : ""
-        , forkedRecordingsVar
+        , parseqGUID : ""
         , recordingVar
+        , forkedRecordingsVar
+        , parSeqRecordingsVar
         , disableEntries : []
         }
   pure $ Tuple brt recordingVar
@@ -375,6 +432,13 @@ runTests = do
           isRight eRes1 `shouldEqual` true    -- TODO: check particular results
           isRight eRes2 `shouldEqual` false   -- TODO: check particular results
 
+    it "ParSequence regular mode test" $ do
+      brt <- createRegularBackendRuntime
+      eResult <- liftAff $ runExceptT (runStateT (runReaderT (runBackend brt parSequenceScript) unit) unit)
+      case eResult of
+        Left err -> fail $ show err
+        Right res  -> true `shouldEqual` true    -- TODO: check particular results
+
   describe "Recording/replaying mode tests" do
     it "Record test" $ do
       Tuple brt recordingVar <- createRecordingBackendRuntime
@@ -399,6 +463,8 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -408,8 +474,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : []
@@ -430,6 +499,66 @@ runTests = do
       mbErr <- readVar errorVar
       mbErr `shouldEqual` Nothing
 
+    it "Record / replay test: Parsequence success" $ do
+      {brt, recordingVar, parSeqRecordingsVar} <- createRecordingBackendRuntimeParseq
+      eResult <- liftAff $ runExceptT (runStateT (runReaderT (runBackend brt parSequenceScript) unit) unit)
+      isRight eResult `shouldEqual` true
+
+      stepVar     <- makeVar 0
+      errorVar    <- makeVar Nothing
+      recording   <- readVar recordingVar
+      kvdbRuntime <- createKVDBRuntime
+      parSeqRecordings' <- readVar parSeqRecordingsVar
+
+      let kvFunc (Tuple k recVar) = Tuple k <$> readVar recVar
+      let (kvs :: Array (Tuple String (AVar RecordingEntries))) = StrMap.toUnfoldable parSeqRecordings'
+      parSeqRecordings'' <- traverse kvFunc kvs
+      let parSeqRecordings = StrMap.fromFoldable parSeqRecordings''
+      length recording `shouldEqual` 3
+      --StrMap.size parSeqRecordings `shouldEqual` 3
+
+      forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty      
+      options <- mkOptions
+      let replayingBackendRuntime = BackendRuntime
+            { apiRunner   : failingApiRunner
+            , connections : StrMap.empty
+            , logRunner   : failingLogRunner
+            , affRunner   : failingAffRunner
+            , kvdbRuntime
+            , mode        : ReplayingMode
+              { flowGUID : ""
+              , parseqGUID : ""
+              , forkedFlowRecordings : StrMap.empty
+              , forkedFlowErrorsVar
+              , parSeqRecordings : parSeqRecordings
+              , parSeqErrorsVar
+              , recording
+              , disableVerify : []
+              , disableMocking : []
+              , skipEntries : []
+              , entriesFiltered : false
+              , stepVar
+              , errorVar
+              }
+              , options
+            }
+      eResult2 <- liftAff $ runExceptT (runStateT (runReaderT (runBackend replayingBackendRuntime parSequenceScript) unit) unit)
+      curStep  <- readVar stepVar
+      --isRight eResult2 `shouldEqual` true
+      case eResult2 of
+        Left err -> fail $ show err
+        Right res  -> do
+                    let res' = fst res
+                        e1  = head res'
+                        e2  = last res'
+                    case e1,e2 of
+                        Nothing , _  -> fail $ "ERROR"
+                        Just (LeftEx err) , Just (LeftEx er2)  -> fail $ (show err <> show er2)
+                        Just (RightEx val), Just (RightEx v2) ->  fail $ (show val <> show v2)
+                        _ , _ -> fail $ "UNEXP"
+          
+
     it "Record / replay test: index out of range" $ do
       Tuple brt recordingVar <- createRecordingBackendRuntime
       eResult <- liftAff $ runExceptT (runStateT (runReaderT (runBackend brt logAndCallAPIScript) unit) unit)
@@ -440,6 +569,8 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -449,8 +580,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : []
@@ -481,6 +615,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -490,8 +625,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : []
@@ -521,6 +659,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -530,8 +669,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : []
@@ -564,6 +706,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -573,8 +716,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : []
@@ -607,6 +753,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -616,8 +763,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : []
@@ -660,6 +810,7 @@ runTests = do
       StrMap.size forkedRecordings `shouldEqual` 3
 
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -669,8 +820,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : []
@@ -714,6 +868,7 @@ runTests = do
       StrMap.size forkedRecordings `shouldEqual` 3
 
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar  <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -723,8 +878,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : forkedRecordings
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar              
               , recording
               , disableVerify : []
               , disableMocking : []
@@ -804,6 +962,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -813,8 +972,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : ["LogEntry"]
               , disableMocking : []
@@ -842,6 +1004,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -851,8 +1014,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : ["CallAPIEntry"]
               , disableMocking : []
@@ -881,6 +1047,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : apiRunner
@@ -890,8 +1057,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : ["LogEntry","CallAPIEntry"]
@@ -920,6 +1090,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -929,8 +1100,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : ["DoAffEntry"]
@@ -963,6 +1137,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : failingApiRunner
@@ -972,8 +1147,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : ["RunSysCmdEntry"]
@@ -1006,6 +1184,7 @@ runTests = do
         recording   <- readVar recordingVar
         kvdbRuntime <- createKVDBRuntime
         forkedFlowErrorsVar <- makeVar StrMap.empty
+        parSeqErrorsVar <- makeVar StrMap.empty
         options <- mkOptions
         let replayingBackendRuntime = BackendRuntime
               { apiRunner   : failingApiRunner
@@ -1015,8 +1194,11 @@ runTests = do
               , kvdbRuntime
               , mode        : ReplayingMode
                 { flowGUID : ""
+                , parseqGUID : ""
                 , forkedFlowRecordings : StrMap.empty
                 , forkedFlowErrorsVar
+                , parSeqRecordings : StrMap.empty
+                , parSeqErrorsVar
                 , recording
                 , disableVerify : []
                 , disableMocking : []
@@ -1045,6 +1227,7 @@ runTests = do
         recording   <- readVar recordingVar
         kvdbRuntime <- createKVDBRuntime
         forkedFlowErrorsVar <- makeVar StrMap.empty
+        parSeqErrorsVar <- makeVar StrMap.empty
         options <- mkOptions
         let replayingBackendRuntime = BackendRuntime
               { apiRunner   : failingApiRunner
@@ -1054,8 +1237,11 @@ runTests = do
               , kvdbRuntime
               , mode        : ReplayingMode
                 { flowGUID : ""
+                , parseqGUID : ""
                 , forkedFlowRecordings : StrMap.empty
                 , forkedFlowErrorsVar
+                , parSeqRecordings : StrMap.empty
+                , parSeqErrorsVar
                 , recording
                 , disableVerify : []
                 , disableMocking : ["LogEntry"]  -- This will have no efect since the priority of Entry Configs are higher than Global Config
@@ -1084,6 +1270,7 @@ runTests = do
         recording   <- readVar recordingVar
         kvdbRuntime <- createKVDBRuntime
         forkedFlowErrorsVar <- makeVar StrMap.empty
+        parSeqErrorsVar <- makeVar StrMap.empty
         options <- mkOptions
         let replayingBackendRuntime = BackendRuntime
               { apiRunner   : apiRunner
@@ -1093,8 +1280,11 @@ runTests = do
               , kvdbRuntime
               , mode        : ReplayingMode
                 { flowGUID : ""
+                , parseqGUID : ""
                 , forkedFlowRecordings : StrMap.empty
                 , forkedFlowErrorsVar
+                , parSeqRecordings : StrMap.empty
+                , parSeqErrorsVar
                 , recording
                 , disableVerify : []
                 , disableMocking : []
@@ -1122,6 +1312,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : apiRunner
@@ -1131,8 +1322,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : []
@@ -1162,6 +1356,7 @@ runTests = do
       recording   <- readVar recordingVar
       kvdbRuntime <- createKVDBRuntime
       forkedFlowErrorsVar <- makeVar StrMap.empty
+      parSeqErrorsVar <- makeVar StrMap.empty
       options <- mkOptions
       let replayingBackendRuntime = BackendRuntime
             { apiRunner   : apiRunner
@@ -1171,8 +1366,11 @@ runTests = do
             , kvdbRuntime
             , mode        : ReplayingMode
               { flowGUID : ""
+              , parseqGUID : ""
               , forkedFlowRecordings : StrMap.empty
               , forkedFlowErrorsVar
+              , parSeqRecordings : StrMap.empty
+              , parSeqErrorsVar
               , recording
               , disableVerify : []
               , disableMocking : []

@@ -40,6 +40,7 @@ import Data.Array (foldl, (:))
 import Data.Either (Either(..), either)
 import Data.Exists (runExists)
 import Data.Maybe (Maybe(..))
+import Data.Monoid (mempty)
 import Data.StrMap as StrMap
 import Data.Tuple (Tuple, fst)
 import Data.UUID (genUUID)
@@ -49,6 +50,7 @@ import Presto.Backend.Language.Types.DB (SqlConn(..))
 import Presto.Backend.Language.Types.EitherEx (EitherEx(..), eitherEx, fromEitherEx, toEitherEx, toCustomEitherEx, class CustomEitherEx)
 import Presto.Backend.Language.Types.MaybeEx (fromMaybeEx, toMaybeEx)
 import Presto.Backend.Language.Types.ParSequence (ParError(..))
+import Presto.Backend.Language.Types.ParSequence (ParError)
 import Presto.Backend.Language.Types.UnitEx (UnitEx(UnitEx))
 import Presto.Backend.Playback.Entries (mkThrowExceptionEntry)
 import Presto.Backend.Playback.Machine.Classless (withRunModeClassless)
@@ -59,7 +61,6 @@ import Presto.Backend.Runtime.KVDBInterpreter (runKVDB)
 import Presto.Backend.Runtime.Types (InterpreterMT, InterpreterMT', BackendRuntime(..), RunningMode(..))
 import Presto.Backend.Runtime.Types as X
 import Presto.Backend.SystemCommands (runSysCmd)
-import Presto.Backend.Language.Types.ParSequence (ParError)
 
 forkF :: forall eff rt st a. BackendRuntime -> BackendFlow st rt a -> InterpreterMT rt st (Tuple Error st) eff Unit
 forkF brt flow = do
@@ -80,8 +81,10 @@ forkRecorderRt flowGUID rt = do
   lift3 $ putVar forkedRecs' rt.forkedRecordingsVar
   pure
     { flowGUID
+    , parseqGUID : ""
     , recordingVar
     , forkedRecordingsVar : rt.forkedRecordingsVar
+    , parSeqRecordingsVar : rt.parSeqRecordingsVar
     , disableEntries      : rt.disableEntries
     }
 
@@ -106,11 +109,14 @@ forkPlayerRt flowGUID rt =
       errorVar <- lift3 $ makeVar Nothing
       pure $ Just
         { flowGUID
+        , parseqGUID : ""
         , stepVar
         , errorVar
         , recording
         , forkedFlowRecordings  : rt.forkedFlowRecordings
         , forkedFlowErrorsVar   : rt.forkedFlowErrorsVar
+        , parSeqRecordings      : rt.parSeqRecordings
+        , parSeqErrorsVar       : rt.parSeqErrorsVar
         , disableVerify         : rt.disableVerify
         , disableMocking        : rt.disableMocking
         , skipEntries           : rt.skipEntries
@@ -200,14 +206,14 @@ interpret brt@(BackendRuntime rt) (Fork flow flowGUID rrItemDict next) = do
         Just forkedBrt -> forkF forkedBrt flow *> pure UnitEx)
   pure $ next UnitEx
 
-interpret brt@(BackendRuntime rt) (ParSequence aflow rrItemDict next) = do
-  st ← R.lift S.get
-  rt ← R.ask
-  res <- withRunModeClassless brt rrItemDict $ (lift3 $ parSequence $ foldl (flowToAff st rt) [] aflow)
+interpret brt@(BackendRuntime rt) (ParSequence aflow parseqGUID rrItemDict next) = do
+  mbParseqRt <- parSequenceBackendRuntime parseqGUID brt
+  res <- withRunModeClassless brt rrItemDict (runMbParseqRt mbParseqRt) 
   pure $ next $ res 
   where
-      flowToAff st rt acc flow =  (liftM1 transfromToEitherEx (E.runExceptT (S.runStateT (R.runReaderT (runBackend brt flow) rt) st))   ) : acc
-      transfromToEitherEx = toCustomEitherEx <<< either (Left <<< fst) (Right <<< fst)
+    runMbParseqRt = case _ of
+      Nothing -> (lift3 (rt.logRunner parseqGUID "Failed to run parsequence.") *> pure [])
+      Just parSeqBrt -> parS parSeqBrt aflow
 
 interpret brt (RunSysCmd cmd rrItemDict next) = do
   res <- withRunModeClassless brt rrItemDict
@@ -247,3 +253,98 @@ interpret brt (RunKVDBSimple dbName kvDBF mockedKvDbActDictF rrItemDict next) =
 
 runBackend :: forall st rt eff a. BackendRuntime -> BackendFlow st rt a -> InterpreterMT' rt st eff a
 runBackend backendRuntime = foldFree (\(BackendFlowWrapper x) -> runExists (interpret backendRuntime) x)
+
+
+
+parS :: forall eff rt st a. BackendRuntime 
+  -> Array (BackendFlow st rt a)
+  -> InterpreterMT rt st (Tuple Error st) eff (Array (EitherEx ParError a))
+parS brt aflow = do
+  st <- R.lift $ S.get
+  rt <- R.ask
+  --let m = E.runExceptT ( S.runStateT ( R.runReaderT ( runBackend brt aflow ) rt) st)
+  lift3 $ parSequence $ foldl (flowToAff st rt) [] aflow
+  where
+      flowToAff st rt acc flow =  (liftM1 transfromToEitherEx (E.runExceptT (S.runStateT (R.runReaderT (runBackend brt flow) rt) st))   ) : acc
+      transfromToEitherEx = toCustomEitherEx <<< either (Left <<< fst) (Right <<< fst)
+
+
+
+parSequenceRecorderRt
+  :: forall eff rt st
+   . String
+  -> RecorderRuntime
+  -> InterpreterMT' rt st eff RecorderRuntime
+parSequenceRecorderRt parseqGUID rt = do
+  recordingVar <- lift3 $ makeVar []
+  parseqRecs   <- lift3 $ takeVar rt.parSeqRecordingsVar
+  let parseqRecs' = StrMap.insert parseqGUID recordingVar parseqRecs
+  lift3 $ putVar parseqRecs' rt.parSeqRecordingsVar
+  pure
+    { flowGUID : ""
+    , parseqGUID
+    , recordingVar
+    , forkedRecordingsVar : rt.forkedRecordingsVar
+    , parSeqRecordingsVar : rt.parSeqRecordingsVar
+    , disableEntries      : rt.disableEntries
+    }
+
+parSequencePlayerRt
+  :: forall eff rt st
+   . String
+  -> PlayerRuntime
+  -> InterpreterMT' rt st eff (Maybe PlayerRuntime)
+parSequencePlayerRt parseqGUID rt =
+  case StrMap.lookup parseqGUID rt.parSeqRecordings of
+    Nothing -> do
+      let missedRecsErr = PlaybackError
+            { errorType    : ForkedFlowRecordingsMissed
+            , errorMessage : "No recordings found for ParSequence: " <> parseqGUID
+            }
+      parSeqErrors <- lift3 $ takeVar rt.parSeqErrorsVar
+      let parSeqErrors' = StrMap.insert parseqGUID missedRecsErr parSeqErrors
+      lift3 $ putVar parSeqErrors' rt.parSeqErrorsVar
+      pure Nothing
+    Just recording -> do
+      stepVar  <- lift3 $ makeVar 0
+      errorVar <- lift3 $ makeVar Nothing
+      pure $ Just
+        { flowGUID : "" 
+        , parseqGUID
+        , stepVar
+        , errorVar
+        , recording
+        , forkedFlowRecordings  : rt.forkedFlowRecordings
+        , forkedFlowErrorsVar   : rt.forkedFlowErrorsVar
+        , parSeqRecordings      : rt.parSeqRecordings
+        , parSeqErrorsVar       : rt.parSeqErrorsVar
+        , disableVerify         : rt.disableVerify
+        , disableMocking        : rt.disableMocking
+        , skipEntries           : rt.skipEntries
+        , entriesFiltered       : rt.entriesFiltered
+        }
+
+parSequenceBackendRuntime
+  :: forall eff rt st
+  . String
+  -> BackendRuntime
+  -> InterpreterMT' rt st eff (Maybe BackendRuntime)
+parSequenceBackendRuntime parseqGUID brt@(BackendRuntime rt) = do
+  mbParseqMode <- case rt.mode of
+    RegularMode              -> pure $ Just RegularMode
+    RecordingMode recorderRt -> (Just <<< RecordingMode) <$> parSequenceRecorderRt parseqGUID recorderRt
+    ReplayingMode playerRt   -> do
+      mbRt <- parSequencePlayerRt parseqGUID playerRt
+      pure $ ReplayingMode <$> mbRt
+
+  case mbParseqMode of
+    Nothing         -> pure Nothing
+    Just parseqMode -> pure $ Just $ BackendRuntime
+          { apiRunner   : rt.apiRunner
+          , connections : rt.connections
+          , logRunner   : rt.logRunner
+          , affRunner   : rt.affRunner
+          , kvdbRuntime : rt.kvdbRuntime
+          , mode        : parseqMode
+          , options     : rt.options
+          }
