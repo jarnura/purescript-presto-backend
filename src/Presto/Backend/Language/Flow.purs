@@ -30,19 +30,20 @@ import Control.Monad.Eff.Exception (Error)
 import Control.Monad.Except (runExcept)
 import Control.Monad.Free (Free, liftF)
 import Data.Bifunctor (bimap)
-import Data.Either (Either(..))
+import Data.Either (Either(..), either)
 import Data.Exists (Exists, mkExists)
 import Data.Foreign (Foreign, toForeign)
 import Data.Foreign.Class (class Decode, class Encode, encode)
-import Data.Foreign.Generic (encodeJSON, decodeJSON)
+import Data.Foreign.Generic (decodeJSON, encodeJSON)
 import Data.Foreign.Generic.Class (class GenericDecode)
 import Data.Generic.Rep (class Generic)
-import Data.Maybe (Maybe(Just, Nothing))
+import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype)
-import Data.Options (Options)
+import Data.Options (Options, options, tag)
 import Data.Options (options) as Opt
 import Data.String (null)
 import Data.Time.Duration (Milliseconds, Seconds)
+import Node.HTTP.Client (headers)
 import Presto.Backend.APIInteract (apiInteract, apiInteractGeneric)
 import Presto.Backend.DB.Mock.Actions (mkCreate, mkCreateWithOpts, mkDelete, mkFindAll, mkFindOne, mkQuery, mkUpdate) as SqlDBMock
 import Presto.Backend.DB.Mock.Types (DBActionDict, mkDbActionDict) as SqlDBMock
@@ -64,6 +65,7 @@ import Presto.Backend.Types.Options (class OptionEntity)
 import Presto.Core.Types.Language.Interaction (Interaction)
 import Sequelize.Class (class Model)
 import Sequelize.Types (Conn, SEQUELIZE)
+import Text.Parsing.Indent (Optional(..))
 
 data BackendFlowCommands next st rt s
     = Ask (rt -> next)
@@ -216,12 +218,19 @@ callAPI
   => Decode b
   => RestEndpoint a b
   => Headers -> a -> BackendFlow st rt (APIResult b)
-callAPI headers a = wrap $ CallAPI
-  (apiInteract a headers)
-  (Playback.mkEntryDict
-    (encodeJSON $ makeRequest a headers)
-    (Playback.mkCallAPIEntry (\_ -> encode $ makeRequest a headers)))
-  id
+callAPI headers request = wrap
+  (CallAPI
+      (apiInteract request headers)
+      (Playback.mkEntryDict
+        (encodeJSON $ makeRequest request headers)
+        (Playback.mkCallAPIEntry (\_ -> encode $ makeRequest request headers)))
+      id)
+  >>= \response → response
+    <$ log "CALLAPI"
+        { request
+        , headers
+        , response : encodeEither response
+        }
 
 callAPIGeneric
   :: ∀ st rt a b err x
@@ -234,12 +243,19 @@ callAPIGeneric
    ⇒ Decode err
    ⇒ RestEndpoint a b
    ⇒ Headers → a → BackendFlow st rt (Either ErrorResponse (Either err b))
-callAPIGeneric headers a = wrap $ CallAPIGeneric
-  (apiInteractGeneric a headers)
-  (Playback.mkEntryDict
-    (encodeJSON $ makeRequest a headers)
-    (Playback.mkCallAPIGenericEntry (\_ → encode $ makeRequest a headers)))
-  id
+callAPIGeneric headers request = wrap
+  (CallAPIGeneric
+    (apiInteractGeneric request headers)
+    (Playback.mkEntryDict
+      (encodeJSON $ makeRequest request headers)
+      (Playback.mkCallAPIGenericEntry (\_ → encode $ makeRequest request headers)))
+    id)
+  >>= \response → response
+    <$ log "CallAPIGENERIC"
+        { request
+        , headers
+        , response : either encode encodeEither response
+        }
 
 doAff :: forall st rt a. (forall eff. BackendAff eff a) -> BackendFlow st rt a
 doAff aff = wrap $ DoAff aff id
@@ -306,29 +322,43 @@ findOne
   :: forall model st rt
    . Model model
   => String -> Options model -> BackendFlow st rt (Either Error (Maybe model))
-findOne dbName options = do
-  eResEx <- wrap $ RunDB dbName
+findOne dbName options =
+  fromDBMaybeResult <$> (wrap $ RunDB dbName
     (\conn     -> toDBMaybeResult <$> DB.findOne conn options)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkFindOne dbName)
     (Playback.mkEntryDict
       (dbName <> ", query: findOne, opts: " <> encodeJSON (Opt.options options) )
       $ Playback.mkRunDBEntry dbName "findOne" [Opt.options options] (encode ""))
-    id
-  pure $ fromDBMaybeResult eResEx
+    id)
+  >>= logFindQuery "FINDONE" options
+
+logFindQuery
+  :: ∀ model st rt f
+   . Model model
+   ⇒ Encode (f model)
+   ⇒ String
+   → Options model
+   → Either Error (f model)
+   → BackendFlow st rt (Either Error (f model))
+logFindQuery tag options queryResult =
+  queryResult <$ log tag
+    { options : encodeJSON $ Opt.options options
+    , queryResult : either toForeign encode queryResult
+    }
 
 findAll
   :: forall model st rt
    . Model model
   => String -> Options model -> BackendFlow st rt (Either Error (Array model))
-findAll dbName options = do
-  eResEx <- wrap $ RunDB dbName
+findAll dbName options =
+  fromCustomEitherEx <$> (wrap $ RunDB dbName
     (\conn -> toCustomEitherEx <$> DB.findAll conn options)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkFindAll dbName)
     (Playback.mkEntryDict
       (dbName <> ", query: findAll, opts: " <> encodeJSON (Opt.options options) )
       $ Playback.mkRunDBEntry dbName "findAll" [Opt.options options] (encode ""))
-    id
-  pure $ fromCustomEitherEx eResEx
+    id)
+  >>= logFindQuery "FINDALL" options
 
 query
   :: forall r a st rt
@@ -336,59 +366,107 @@ query
   => Decode a
   => Newtype a {|r}
   => String -> String -> BackendFlow st rt (Either Error (Array a))
-query dbName rawq = do
-  eResEx <- wrap $ RunDB dbName
+query dbName rawq =
+ fromCustomEitherEx <$> (wrap $ RunDB dbName
     (\conn -> toCustomEitherEx <$> DB.query conn rawq)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkQuery dbName)
     (Playback.mkEntryDict
         (dbName <> ", rawq: " <> rawq)
         $ Playback.mkRunDBEntry dbName "query" [toForeign rawq] (encode ""))
-    id
-  pure $ fromCustomEitherEx eResEx
+    id)
+ >>= \queryResult → queryResult
+  <$ log "QUERY"
+    { rawQuery : encode rawq
+    , queryResult : either toForeign encode queryResult
+    }
+
+logQuery
+  :: ∀ model st rt f
+   . Model model
+   ⇒ Encode (f model)
+   ⇒ String
+   → Maybe model
+   → Maybe (Options model)
+   → Either Error (f model)
+   → BackendFlow st rt (Either Error (f model))
+logQuery action (Just model) (Just options) queryResult =
+  queryResult <$ log action
+    { model : encodeJSON model
+    , options : encodeJSON $ Opt.options options
+    , queryResult : either toForeign encode queryResult
+    , action
+    , dbName : ""
+    }
+
+logQuery action (Just model) Nothing queryResult =
+  queryResult <$ log action
+    { model : encodeJSON model
+    , options : ""
+    , queryResult : either toForeign encode queryResult
+    , action
+    , dbName : ""
+    }
+
+logQuery _ _ _ queryResult = pure queryResult
 
 create :: forall model st rt. Model model => String -> model -> BackendFlow st rt (Either Error (Maybe model))
-create dbName model = do
-  eResEx <- wrap $ RunDB dbName
+create dbName model =
+ fromDBMaybeResult <$> (wrap $ RunDB dbName
     (\conn -> toDBMaybeResult <$> DB.create conn model)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkCreate dbName)
     (Playback.mkEntryDict
       ("dbName: " <> dbName <> ", create " <> encodeJSON model)
       $ Playback.mkRunDBEntry dbName "create" [] (encode model))
-    id
-  pure $ fromDBMaybeResult eResEx
+    id)
+  >>= logQuery "CREATE" (Just model) Nothing
 
 createWithOpts :: forall model st rt. Model model => String -> model -> Options model -> BackendFlow st rt (Either Error (Maybe model))
-createWithOpts dbName model options = do
-  eResEx <- wrap $ RunDB dbName
+createWithOpts dbName model options =
+ fromDBMaybeResult <$> (wrap $ RunDB dbName
     (\conn -> toDBMaybeResult <$> DB.createWithOpts conn model options)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkCreateWithOpts dbName)
     (Playback.mkEntryDict
       ("dbName: " <> dbName <> ", createWithOpts " <> encodeJSON model <> ", opts: " <> encodeJSON (Opt.options options))
       $ Playback.mkRunDBEntry dbName "createWithOpts" [Opt.options options] (encode model))
-    id
-  pure $ fromDBMaybeResult eResEx
+    id)
+  >>= logQuery "CREATEWITHOPS" (Just model) (Just options)
 
 update :: forall model st rt. Model model => String -> Options model -> Options model -> BackendFlow st rt (Either Error (Array model))
-update dbName updateValues whereClause = do
-  eResEx <- wrap $ RunDB dbName
+update dbName updateValues whereClause =
+ fromCustomEitherEx <$> (wrap $ RunDB dbName
     (\conn -> toCustomEitherEx <$> DB.update conn updateValues whereClause)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkUpdate dbName)
     (Playback.mkEntryDict
       (dbName <> ", update, updVals: " <> encodeJSON [(Opt.options updateValues),(Opt.options whereClause)])
       $ Playback.mkRunDBEntry dbName "update" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
-    id
-  pure $ fromCustomEitherEx eResEx
+    id)
+  >>= \queryResult → queryResult
+    <$ log "UPDATE"
+        { model : ""
+        , options : encodeJSON [(Opt.options updateValues),(Opt.options whereClause)]
+        , queryResult : either toForeign encode queryResult
+        , action : "UPDATE"
+        , dbName : ""
+        }
+
 
 update' :: forall model st rt. Model model => String -> Options model -> Options model -> BackendFlow st rt (Either Error Int)
 update' dbName updateValues whereClause = do
-  eResEx <- wrap $ RunDB dbName
+ fromCustomEitherEx <$> (wrap $ RunDB dbName
     (\conn -> toCustomEitherEx <$> DB.update' conn updateValues whereClause)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkUpdate dbName)
     (Playback.mkEntryDict
       (dbName <> ", update', updVals: " <> encodeJSON [(Opt.options updateValues),(Opt.options whereClause)] )
       $ Playback.mkRunDBEntry dbName "update'" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
-    id
-  pure $ fromCustomEitherEx eResEx
+    id)
+  >>= \queryResult → queryResult
+    <$ log "UPDATE'"
+        { model : ""
+        , options : encodeJSON [(Opt.options updateValues),(Opt.options whereClause)]
+        , queryResult : either toForeign encode queryResult
+        , action : "UPDATE'"
+        , dbName : ""
+        }
 
 delete :: forall model st rt. Model model => String -> Options model -> BackendFlow st rt (Either Error Int)
 delete dbName options = do
@@ -777,3 +855,6 @@ setMessageHandler dbName f = do
         ("dbName: " <> dbName <> ", setMessageHandler")
         $ Playback.mkRunKVDBSimpleEntry dbName "setMessageHandler" "")
       id
+
+encodeEither :: ∀ a b. Encode a ⇒ Encode b ⇒ Either a b → Foreign
+encodeEither = either encode encode
