@@ -37,7 +37,7 @@ import Data.Foreign.Class (class Decode, class Encode, encode)
 import Data.Foreign.Generic (decodeJSON, encodeJSON)
 import Data.Foreign.Generic.Class (class GenericDecode)
 import Data.Generic.Rep (class Generic)
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), maybe)
 import Data.Newtype (class Newtype)
 import Data.Options (Options, options, tag)
 import Data.Options (options) as Opt
@@ -330,20 +330,10 @@ findOne dbName options =
       (dbName <> ", query: findOne, opts: " <> encodeJSON (Opt.options options) )
       $ Playback.mkRunDBEntry dbName "findOne" [Opt.options options] (encode ""))
     id)
-  >>= logFindQuery "FINDONE" options
-
-logFindQuery
-  :: ∀ model st rt f
-   . Model model
-   ⇒ Encode (f model)
-   ⇒ String
-   → Options model
-   → Either Error (f model)
-   → BackendFlow st rt (Either Error (f model))
-logFindQuery tag options queryResult =
-  queryResult <$ log tag
-    { options : encodeJSON $ Opt.options options
-    , queryResult : either toForeign encode queryResult
+  >>= \queryResult → queryResult <$ log "FINDONE"
+    { queryResult : either (toForeign <<< show) (maybe (toForeign "object not found") $ encode) queryResult
+    , action      : "FIND"
+    , dbName
     }
 
 findAll
@@ -358,7 +348,11 @@ findAll dbName options =
       (dbName <> ", query: findAll, opts: " <> encodeJSON (Opt.options options) )
       $ Playback.mkRunDBEntry dbName "findAll" [Opt.options options] (encode ""))
     id)
-  >>= logFindQuery "FINDALL" options
+  >>= \queryResult → queryResult <$ log "FINDALL"
+    { queryResult : either toForeign encode queryResult
+    , action      : "FIND"
+    , dbName
+    }
 
 query
   :: forall r a st rt
@@ -376,38 +370,10 @@ query dbName rawq =
     id)
  >>= \queryResult → queryResult
   <$ log "QUERY"
-    { rawQuery : encode rawq
-    , queryResult : either toForeign encode queryResult
+    { queryResult : either toForeign encode queryResult
+    , action      : "QUERY"
+    , dbName
     }
-
-logQuery
-  :: ∀ model st rt f
-   . Model model
-   ⇒ Encode (f model)
-   ⇒ String
-   → Maybe model
-   → Maybe (Options model)
-   → Either Error (f model)
-   → BackendFlow st rt (Either Error (f model))
-logQuery action (Just model) (Just options) queryResult =
-  queryResult <$ log action
-    { model : encodeJSON model
-    , options : encodeJSON $ Opt.options options
-    , queryResult : either toForeign encode queryResult
-    , action
-    , dbName : ""
-    }
-
-logQuery action (Just model) Nothing queryResult =
-  queryResult <$ log action
-    { model : encodeJSON model
-    , options : ""
-    , queryResult : either toForeign encode queryResult
-    , action
-    , dbName : ""
-    }
-
-logQuery _ _ _ queryResult = pure queryResult
 
 create :: forall model st rt. Model model => String -> model -> BackendFlow st rt (Either Error (Maybe model))
 create dbName model =
@@ -418,7 +384,11 @@ create dbName model =
       ("dbName: " <> dbName <> ", create " <> encodeJSON model)
       $ Playback.mkRunDBEntry dbName "create" [] (encode model))
     id)
-  >>= logQuery "CREATE" (Just model) Nothing
+  >>= \queryResult → queryResult <$ log "CREATE"
+    { queryResult : either toForeign (maybe (toForeign "object not found") encode) queryResult
+    , action : "CREATE"
+    , dbName : ""
+    }
 
 createWithOpts :: forall model st rt. Model model => String -> model -> Options model -> BackendFlow st rt (Either Error (Maybe model))
 createWithOpts dbName model options =
@@ -429,7 +399,12 @@ createWithOpts dbName model options =
       ("dbName: " <> dbName <> ", createWithOpts " <> encodeJSON model <> ", opts: " <> encodeJSON (Opt.options options))
       $ Playback.mkRunDBEntry dbName "createWithOpts" [Opt.options options] (encode model))
     id)
-  >>= logQuery "CREATEWITHOPS" (Just model) (Just options)
+  >>= \queryResult → queryResult <$ log "CREATEWITHOPS"
+    { queryResult : either toForeign (maybe (toForeign "object not found") encode) queryResult
+    , action      : "CREATE"
+    , dbName
+    }
+
 
 update :: forall model st rt. Model model => String -> Options model -> Options model -> BackendFlow st rt (Either Error (Array model))
 update dbName updateValues whereClause =
@@ -442,11 +417,9 @@ update dbName updateValues whereClause =
     id)
   >>= \queryResult → queryResult
     <$ log "UPDATE"
-        { model : ""
-        , options : encodeJSON [(Opt.options updateValues),(Opt.options whereClause)]
-        , queryResult : either toForeign encode queryResult
-        , action : "UPDATE"
-        , dbName : ""
+        { queryResult : either toForeign encode queryResult
+        , action      : "UPDATE"
+        , dbName
         }
 
 
@@ -461,11 +434,9 @@ update' dbName updateValues whereClause = do
     id)
   >>= \queryResult → queryResult
     <$ log "UPDATE'"
-        { model : ""
-        , options : encodeJSON [(Opt.options updateValues),(Opt.options whereClause)]
-        , queryResult : either toForeign encode queryResult
-        , action : "UPDATE'"
-        , dbName : ""
+        { queryResult : either toForeign encode queryResult
+        , action      : "UPDATE"
+        , dbName
         }
 
 delete :: forall model st rt. Model model => String -> Options model -> BackendFlow st rt (Either Error Int)
