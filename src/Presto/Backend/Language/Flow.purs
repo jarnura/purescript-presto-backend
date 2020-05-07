@@ -30,7 +30,7 @@ import Control.Monad.Eff.Exception (Error)
 import Control.Monad.Except (runExcept)
 import Control.Monad.Free (Free, liftF)
 import Data.Bifunctor (bimap)
-import Data.Either (Either(..), either)
+import Data.Either (Either(..), either, isRight)
 import Data.Exists (Exists, mkExists)
 import Data.Foreign (Foreign, toForeign)
 import Data.Foreign.Class (class Decode, class Encode, encode)
@@ -63,9 +63,10 @@ import Presto.Backend.Types (BackendAff)
 import Presto.Backend.Types.API (class RestEndpoint, APIResult, ErrorResponse, Headers, makeRequest)
 import Presto.Backend.Types.Options (class OptionEntity)
 import Presto.Core.Types.Language.Interaction (Interaction)
-import Sequelize.Class (class Model)
+import Sequelize.Class (class Model, modelName)
 import Sequelize.Types (Conn, SEQUELIZE)
 import Text.Parsing.Indent (Optional(..))
+import Type.Proxy (Proxy(..))
 
 data BackendFlowCommands next st rt s
     = Ask (rt -> next)
@@ -226,9 +227,10 @@ callAPI headers request = wrap
         (Playback.mkCallAPIEntry (\_ -> encode $ makeRequest request headers)))
       id)
   >>= \response → response
-    <$ log "CALLAPI"
-        { request
-        , headers
+    <$ log "EventCallApi"
+        { requestPayloadJson: encode request
+        , request: encode $ makeRequest request headers
+        , success: isRight response
         , response : encodeEither response
         }
 
@@ -250,11 +252,12 @@ callAPIGeneric headers request = wrap
       (encodeJSON $ makeRequest request headers)
       (Playback.mkCallAPIGenericEntry (\_ → encode $ makeRequest request headers)))
     id)
-  >>= \response → response
-    <$ log "CallAPIGENERIC"
-        { request
-        , headers
-        , response : either encode encodeEither response
+  >>= \response →  response
+    <$ log "EventCallApiGeneric"
+        { requestPayloadJson: encode request
+        , request: encode $ makeRequest request headers
+        , success: isRight response
+        , response: either encode encodeEither response
         }
 
 doAff :: forall st rt a. (forall eff. BackendAff eff a) -> BackendFlow st rt a
@@ -330,10 +333,12 @@ findOne dbName options =
       (dbName <> ", query: findOne, opts: " <> encodeJSON (Opt.options options) )
       $ Playback.mkRunDBEntry dbName "findOne" [Opt.options options] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ log "FINDONE"
-    { queryResult : either (toForeign <<< show) (maybe (toForeign "object not found") $ encode) queryResult
-    , action      : "FIND"
-    , dbName
+  >>= \queryResult → queryResult <$ log "EventDB"
+    { action : "FindOne"
+    , query: Opt.options options
+    , table: modelName (Proxy :: Proxy model)
+    , db: dbName
+    , result: either (toForeign <<< show) (maybe (toForeign "Object not found") $ encode) queryResult
     }
 
 findAll
@@ -348,10 +353,12 @@ findAll dbName options =
       (dbName <> ", query: findAll, opts: " <> encodeJSON (Opt.options options) )
       $ Playback.mkRunDBEntry dbName "findAll" [Opt.options options] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ log "FINDALL"
-    { queryResult : either toForeign encode queryResult
-    , action      : "FIND"
-    , dbName
+  >>= \queryResult → queryResult <$ log "EventDB"
+    { action: "FindAll"
+    , query: Opt.options options
+    , table: modelName (Proxy :: Proxy model)
+    , db: dbName
+    , result: either toForeign encode queryResult
     }
 
 query
@@ -369,10 +376,11 @@ query dbName rawq =
         $ Playback.mkRunDBEntry dbName "query" [toForeign rawq] (encode ""))
     id)
  >>= \queryResult → queryResult
-  <$ log "QUERY"
-    { queryResult : either toForeign encode queryResult
-    , action      : "QUERY"
-    , dbName
+  <$ log "EventDB"
+    { action: "Query"
+    , rawQuery: rawq
+    , db: dbName
+    , result: either toForeign encode queryResult
     }
 
 create :: forall model st rt. Model model => String -> model -> BackendFlow st rt (Either Error (Maybe model))
@@ -384,10 +392,12 @@ create dbName model =
       ("dbName: " <> dbName <> ", create " <> encodeJSON model)
       $ Playback.mkRunDBEntry dbName "create" [] (encode model))
     id)
-  >>= \queryResult → queryResult <$ log "CREATE"
-    { queryResult : either toForeign (maybe (toForeign "object not found") encode) queryResult
-    , action : "CREATE"
-    , dbName : ""
+  >>= \queryResult → queryResult <$ log "EventDB"
+    { action: "Create"
+    , data: encode model
+    , table: modelName (Proxy :: Proxy model)
+    , db: dbName
+    , result: either toForeign (maybe (toForeign "Object not found") encode) queryResult
     }
 
 createWithOpts :: forall model st rt. Model model => String -> model -> Options model -> BackendFlow st rt (Either Error (Maybe model))
@@ -399,10 +409,13 @@ createWithOpts dbName model options =
       ("dbName: " <> dbName <> ", createWithOpts " <> encodeJSON model <> ", opts: " <> encodeJSON (Opt.options options))
       $ Playback.mkRunDBEntry dbName "createWithOpts" [Opt.options options] (encode model))
     id)
-  >>= \queryResult → queryResult <$ log "CREATEWITHOPS"
-    { queryResult : either toForeign (maybe (toForeign "object not found") encode) queryResult
-    , action      : "CREATE"
-    , dbName
+  >>= \queryResult → queryResult <$ log "EventDB"
+    { action: "CreateWithOpts"
+    , data: encode model
+    , options: Opt.options options
+    , table: modelName (Proxy :: Proxy model)
+    , db: dbName
+    , result : either toForeign (maybe (toForeign "Object not found") encode) queryResult
     }
 
 
@@ -416,10 +429,12 @@ update dbName updateValues whereClause =
       $ Playback.mkRunDBEntry dbName "update" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
     id)
   >>= \queryResult → queryResult
-    <$ log "UPDATE"
-        { queryResult : either toForeign encode queryResult
-        , action      : "UPDATE"
-        , dbName
+    <$ log "EventDB"       -- TODO: get tablename
+        { action: "Update"
+        , query: Opt.options whereClause
+        , data: Opt.options updateValues
+        , db: dbName
+        , result: either toForeign encode queryResult
         }
 
 
@@ -433,10 +448,12 @@ update' dbName updateValues whereClause = do
       $ Playback.mkRunDBEntry dbName "update'" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
     id)
   >>= \queryResult → queryResult
-    <$ log "UPDATE'"
-        { queryResult : either toForeign encode queryResult
-        , action      : "UPDATE"
-        , dbName
+    <$ log "EventDB"         --TODO: get tablename
+        { action: "Update'"
+        , query: Opt.options whereClause
+        , data: Opt.options updateValues
+        , db: dbName
+        , result : either toForeign encode queryResult
         }
 
 delete :: forall model st rt. Model model => String -> Options model -> BackendFlow st rt (Either Error Int)
@@ -448,7 +465,14 @@ delete dbName options = do
       ("dbName: " <> dbName <> ", delete, opts: " <> encodeJSON (Opt.options options))
       $ Playback.mkRunDBEntry dbName "delete" [Opt.options options] (encode ""))
     id
-  pure $ fromCustomEitherEx eResEx
+  let queryResult = fromCustomEitherEx eResEx
+  log "EventDB"             --TODO: get tablename
+    { action: "Delete"
+    , query: Opt.options options
+    , db: dbName
+    , result: either toForeign encode queryResult
+    }
+  pure queryResult
 
 getKVDBConn :: forall st rt. String -> BackendFlow st rt KVDBConn
 getKVDBConn dbName = wrap $ GetKVDBConn dbName
