@@ -428,18 +428,18 @@ update dbName updateValues whereClause =
       (dbName <> ", update, updVals: " <> encodeJSON [(Opt.options updateValues),(Opt.options whereClause)])
       $ Playback.mkRunDBEntry dbName "update" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
     id)
-  >>= \queryResult → queryResult
-    <$ log "EventDB"       -- TODO: get tablename
-        { action: "Update"
-        , query: Opt.options whereClause
-        , data: Opt.options updateValues
-        , db: dbName
-        , result: either toForeign encode queryResult
-        }
+  >>= \queryResult → queryResult <$ log "EventDB"
+    { action: "Update"
+    , query: Opt.options whereClause
+    , data: Opt.options updateValues
+    , table: modelName (Proxy :: Proxy model)
+    , db: dbName
+    , result: either toForeign encode queryResult
+    }
 
 
 update' :: forall model st rt. Model model => String -> Options model -> Options model -> BackendFlow st rt (Either Error Int)
-update' dbName updateValues whereClause = do
+update' dbName updateValues whereClause =
  fromCustomEitherEx <$> (wrap $ RunDB dbName
     (\conn -> toCustomEitherEx <$> DB.update' conn updateValues whereClause)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkUpdate dbName)
@@ -447,32 +447,31 @@ update' dbName updateValues whereClause = do
       (dbName <> ", update', updVals: " <> encodeJSON [(Opt.options updateValues),(Opt.options whereClause)] )
       $ Playback.mkRunDBEntry dbName "update'" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
     id)
-  >>= \queryResult → queryResult
-    <$ log "EventDB"         --TODO: get tablename
-        { action: "Update'"
-        , query: Opt.options whereClause
-        , data: Opt.options updateValues
-        , db: dbName
-        , result : either toForeign encode queryResult
-        }
+  >>= \queryResult → queryResult <$ log "EventDB"
+    { action: "Update'"
+    , query: Opt.options whereClause
+    , data: Opt.options updateValues
+    , table: modelName (Proxy :: Proxy model)
+    , db: dbName
+    , result : either toForeign encode queryResult
+    }
 
 delete :: forall model st rt. Model model => String -> Options model -> BackendFlow st rt (Either Error Int)
-delete dbName options = do
-  eResEx <- wrap $ RunDB dbName
+delete dbName options =
+  fromCustomEitherEx <$> (wrap $ RunDB dbName
     (\conn -> toCustomEitherEx <$> DB.delete conn options)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkDelete dbName)
     (Playback.mkEntryDict
       ("dbName: " <> dbName <> ", delete, opts: " <> encodeJSON (Opt.options options))
       $ Playback.mkRunDBEntry dbName "delete" [Opt.options options] (encode ""))
-    id
-  let queryResult = fromCustomEitherEx eResEx
-  log "EventDB"             --TODO: get tablename
+    id)
+  >>= \queryResult → queryResult <$ log "EventDB"
     { action: "Delete"
     , query: Opt.options options
+    , table: modelName (Proxy :: Proxy model)
     , db: dbName
     , result: either toForeign encode queryResult
     }
-  pure queryResult
 
 getKVDBConn :: forall st rt. String -> BackendFlow st rt KVDBConn
 getKVDBConn dbName = wrap $ GetKVDBConn dbName
