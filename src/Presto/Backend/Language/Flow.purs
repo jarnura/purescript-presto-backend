@@ -256,7 +256,7 @@ callAPIGeneric headers request = wrap
     <$ log "EventCallApiGeneric"
         { requestPayloadJson: encode request
         , request: encode $ makeRequest request headers
-        , success: isRight response
+        , success: either (const false) isRight
         , response: either encode encodeEither response
         }
 
