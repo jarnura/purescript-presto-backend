@@ -227,7 +227,7 @@ callAPI headers request = wrap
         (Playback.mkCallAPIEntry (\_ -> encode $ makeRequest request headers)))
       id)
   >>= \response → response
-    <$ log "EventCallApi"
+    <$ eventLog "EventCallApi"
         { requestPayloadJson: encode request
         , request: encode $ makeRequest request headers
         , success: isRight response
@@ -253,7 +253,7 @@ callAPIGeneric headers request = wrap
       (Playback.mkCallAPIGenericEntry (\_ → encode $ makeRequest request headers)))
     id)
   >>= \response →  response
-    <$ log "EventCallApiGeneric"
+    <$ eventLog "EventCallApiGeneric"
         { requestPayloadJson: encode request
         , request: encode $ makeRequest request headers
         , success: either (const false) isRight
@@ -288,6 +288,9 @@ log tag message = void $ wrap $ Log tag message
       ("tag: " <> tag <> ", message: " <> jsonStringify message)
       $ Playback.mkLogEntry tag $ jsonStringify message)
     id
+
+eventLog :: forall st rt a. String -> a -> BackendFlow st rt Unit
+eventLog = log
 
 forkFlow' :: forall st rt a. String -> BackendFlow st rt a -> BackendFlow st rt Unit
 forkFlow' description flow = do
@@ -333,7 +336,7 @@ findOne dbName options =
       (dbName <> ", query: findOne, opts: " <> encodeJSON (Opt.options options) )
       $ Playback.mkRunDBEntry dbName "findOne" [Opt.options options] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ log "EventDB"
+  >>= \queryResult → queryResult <$ eventLog "EventDB"
     { action : "FindOne"
     , query: Opt.options options
     , table: modelName (Proxy :: Proxy model)
@@ -353,7 +356,7 @@ findAll dbName options =
       (dbName <> ", query: findAll, opts: " <> encodeJSON (Opt.options options) )
       $ Playback.mkRunDBEntry dbName "findAll" [Opt.options options] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ log "EventDB"
+  >>= \queryResult → queryResult <$ eventLog "EventDB"
     { action: "FindAll"
     , query: Opt.options options
     , table: modelName (Proxy :: Proxy model)
@@ -376,7 +379,7 @@ query dbName rawq =
         $ Playback.mkRunDBEntry dbName "query" [toForeign rawq] (encode ""))
     id)
  >>= \queryResult → queryResult
-  <$ log "EventDB"
+  <$ eventLog "EventDB"
     { action: "Query"
     , rawQuery: rawq
     , db: dbName
@@ -392,10 +395,11 @@ create dbName model =
       ("dbName: " <> dbName <> ", create " <> encodeJSON model)
       $ Playback.mkRunDBEntry dbName "create" [] (encode model))
     id)
-  >>= \queryResult → queryResult <$ log "EventDB"
+  >>= \queryResult → queryResult <$ eventLog "EventDB"
     { action: "Create"
     , data: encode model
     , table: modelName (Proxy :: Proxy model)
+    , success: isRight queryResult
     , db: dbName
     , result: either toForeign (maybe (toForeign "Object not found") encode) queryResult
     }
@@ -409,11 +413,12 @@ createWithOpts dbName model options =
       ("dbName: " <> dbName <> ", createWithOpts " <> encodeJSON model <> ", opts: " <> encodeJSON (Opt.options options))
       $ Playback.mkRunDBEntry dbName "createWithOpts" [Opt.options options] (encode model))
     id)
-  >>= \queryResult → queryResult <$ log "EventDB"
+  >>= \queryResult → queryResult <$ eventLog "EventDB"
     { action: "CreateWithOpts"
     , data: encode model
     , options: Opt.options options
     , table: modelName (Proxy :: Proxy model)
+    , success: isRight queryResult
     , db: dbName
     , result : either toForeign (maybe (toForeign "Object not found") encode) queryResult
     }
@@ -428,14 +433,15 @@ update dbName updateValues whereClause =
       (dbName <> ", update, updVals: " <> encodeJSON [(Opt.options updateValues),(Opt.options whereClause)])
       $ Playback.mkRunDBEntry dbName "update" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ log "EventDB"
-    { action: "Update"
-    , query: Opt.options whereClause
-    , data: Opt.options updateValues
-    , table: modelName (Proxy :: Proxy model)
-    , db: dbName
-    , result: either toForeign encode queryResult
-    }
+  >>= \queryResult → queryResult <$ eventLog "EventDB"
+        { action: "Update"
+        , query: Opt.options whereClause
+        , data: Opt.options updateValues
+        , table: modelName (Proxy :: Proxy model)
+        , success: isRight queryResult
+        , db: dbName
+        , result: either toForeign encode queryResult
+        }
 
 
 update' :: forall model st rt. Model model => String -> Options model -> Options model -> BackendFlow st rt (Either Error Int)
@@ -447,14 +453,15 @@ update' dbName updateValues whereClause =
       (dbName <> ", update', updVals: " <> encodeJSON [(Opt.options updateValues),(Opt.options whereClause)] )
       $ Playback.mkRunDBEntry dbName "update'" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ log "EventDB"
-    { action: "Update'"
-    , query: Opt.options whereClause
-    , data: Opt.options updateValues
-    , table: modelName (Proxy :: Proxy model)
-    , db: dbName
-    , result : either toForeign encode queryResult
-    }
+  >>= \queryResult → queryResult <$ eventLog "EventDB"
+        { action: "Update'"
+        , query: Opt.options whereClause
+        , data: Opt.options updateValues
+        , table: modelName (Proxy :: Proxy model)
+        , success: isRight queryResult
+        , db: dbName
+        , result : either toForeign encode queryResult
+        }
 
 delete :: forall model st rt. Model model => String -> Options model -> BackendFlow st rt (Either Error Int)
 delete dbName options =
@@ -465,13 +472,15 @@ delete dbName options =
       ("dbName: " <> dbName <> ", delete, opts: " <> encodeJSON (Opt.options options))
       $ Playback.mkRunDBEntry dbName "delete" [Opt.options options] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ log "EventDB"
-    { action: "Delete"
-    , query: Opt.options options
-    , table: modelName (Proxy :: Proxy model)
-    , db: dbName
-    , result: either toForeign encode queryResult
-    }
+  >>= \queryResult -> queryResult <$
+    eventLog "EventDB"
+      { action: "Delete"
+      , query: Opt.options options
+      , table: modelName (Proxy :: Proxy model)
+      , success: isRight queryResult
+      , db: dbName
+      , result: either toForeign encode queryResult
+      }
 
 getKVDBConn :: forall st rt. String -> BackendFlow st rt KVDBConn
 getKVDBConn dbName = wrap $ GetKVDBConn dbName
@@ -491,7 +500,16 @@ setCache dbName key value = do
         ("dbName: " <> dbName <> ", setCache, key: " <> key <> ", value: " <> value)
         $ Playback.mkRunKVDBEitherEntry dbName "setCache" ("key: " <> key <> ", value: " <> value))
       id
-  pure $ fromCustomEitherExF fromUnitEx eRes
+  let res = fromCustomEitherExF fromUnitEx eRes
+  eventLog "EventKV"
+    { action: "SetCache"
+    , key
+    , value
+    , success: isRight res
+    , db: dbName
+    , result: either toForeign (const (toForeign "Set successfully")) res
+    }
+  pure res
 
 setCacheWithOpts :: forall st rt. String -> String ->  String -> Maybe Milliseconds -> SetOptions -> BackendFlow st rt (Either Error Boolean)
 setCacheWithOpts dbName key value mbTtl opts = do
@@ -502,7 +520,18 @@ setCacheWithOpts dbName key value mbTtl opts = do
             ("dbName: " <> dbName <> ", setCacheWithOpts, key: " <> key <> ", value: " <> value <> ", opts: " <> (show opts))
             $ Playback.mkRunKVDBEitherEntry dbName "setCacheWithOpts" ("key: " <> key <> ", value: " <> value <> ", opts: " <> (show opts)))
           id
-  (pure <<< bimap fromDBError id <<< fromEitherEx) eRes
+  let res = (bimap fromDBError id <<< fromEitherEx) eRes
+  eventLog "EventKV"
+    { action: "SetCacheWithOpts"
+    , key
+    , value
+    , ttl: mbTtl
+    , opts
+    , success: isRight res
+    , db: dbName
+    , result: either toForeign encode res
+    }
+  pure res
 
 -- Not sure about this method.
 -- Should we wrap Unit?
@@ -515,7 +544,17 @@ setCacheWithExpiry dbName key value ttl = do
         ("dbName: " <> dbName <> ", setCacheWithExpiry, key: " <> key <> ", value: " <> value <> ", ttl: " <> show ttl)
         $ Playback.mkRunKVDBEitherEntry dbName "setCacheWithExpiry" ("key: " <> key <> ", value: " <> value <> ", ttl: " <> show ttl))
       id
-  pure $ fromCustomEitherExF fromUnitEx eRes
+  let res = fromCustomEitherExF fromUnitEx eRes
+  eventLog "EventKV"
+    { action: "SetCacheWithExpiry"
+    , key
+    , value
+    , ttl
+    , success: isRight res
+    , db: dbName
+    , result: either toForeign (const (toForeign "Set successfully")) res
+    }
+  pure res
 
 getCache :: forall st rt. String -> String -> BackendFlow st rt (Either Error (Maybe String))
 getCache dbName key = do
@@ -526,7 +565,15 @@ getCache dbName key = do
         ("dbName: " <> dbName <> ", getCache, key: " <> key)
         $ Playback.mkRunKVDBEitherEntry dbName "getCache" ("key: " <> key))
       id
-  pure $ fromDBMaybeResult eRes
+  let res = fromDBMaybeResult eRes
+  eventLog "EventKV"
+   { action: "GetCache"
+   , key
+   , success: isRight res
+   , db: dbName
+   , result: either toForeign toForeign res
+   }
+  pure res
 
 keyExistsCache :: forall st rt. String -> String -> BackendFlow st rt (Either Error Boolean)
 keyExistsCache dbName key = do
@@ -537,7 +584,15 @@ keyExistsCache dbName key = do
         ("dbName: " <> dbName <> ", keyExistsCache, key: " <> key)
         $ Playback.mkRunKVDBEitherEntry dbName "keyExistsCache" ("key: " <> key))
       id
-  pure $ fromCustomEitherEx eRes
+  let res = fromCustomEitherEx eRes
+  eventLog "EventKV"
+   { action: "KeyExistsCache"
+   , key
+   , success: isRight res
+   , db: dbName
+   , result: either toForeign encode res
+   }
+  pure res
 
 delCache :: forall st rt. String -> String -> BackendFlow st rt (Either Error Int)
 delCache dbName key = do
@@ -548,7 +603,15 @@ delCache dbName key = do
         ("dbName: " <> dbName <> ", delCache, key: " <> key)
         $ Playback.mkRunKVDBEitherEntry dbName "delCache" ("key: " <> key))
       id
-  pure $ fromCustomEitherEx eRes
+  let res = fromCustomEitherEx eRes
+  eventLog "EventKV"
+   { action: "DelCache"
+   , key
+   , success: isRight res
+   , db: dbName
+   , result: either toForeign encode res
+   }
+  pure res
 
 expire :: forall st rt. String -> String -> Seconds -> BackendFlow st rt (Either Error Boolean)
 expire dbName key ttl = do
@@ -559,7 +622,16 @@ expire dbName key ttl = do
         ("dbName: " <> dbName <> ", delCache, key: " <> key <> ", ttl: " <> show ttl)
         $ Playback.mkRunKVDBEitherEntry dbName "expire" ("key: " <> key <> ", ttl: " <> show ttl))
       id
-  pure $ fromCustomEitherEx eRes
+  let res = fromCustomEitherEx eRes
+  eventLog "EventKV"
+    { action: "Expire"
+    , key
+    , ttl
+    , success: isRight res
+    , db: dbName
+    , result: either toForeign encode res
+    }
+  pure res
 
 incr :: forall st rt. String -> String -> BackendFlow st rt (Either Error Int)
 incr dbName key = do
@@ -570,7 +642,15 @@ incr dbName key = do
         ("dbName: " <> dbName <> ", incr, key: " <> key)
         $ Playback.mkRunKVDBEitherEntry dbName "incr" ("key: " <> key))
       id
-  pure $ fromCustomEitherEx eRes
+  let res = fromCustomEitherEx eRes
+  eventLog "EventKV"
+   { action: "Incr"
+   , key
+   , success: isRight res
+   , db: dbName
+   , result: either toForeign encode res
+   }
+  pure res
 
 setHash :: forall st rt. String -> String -> String -> String -> BackendFlow st rt (Either Error Boolean)
 setHash dbName key field value = do
@@ -581,7 +661,18 @@ setHash dbName key field value = do
         ("dbName: " <> dbName <> ", setHash, key: " <> key <> ", field: " <> field <> ", value: " <> value)
         $ Playback.mkRunKVDBEitherEntry dbName "setHash" ("key: " <> key <> ", field: " <> field <> ", value: " <> value))
       id
-  pure $ fromCustomEitherEx eRes
+  let res = fromCustomEitherEx eRes
+  eventLog "EventKV"
+   { action: "SetHash"
+   , key
+   , field
+   , value
+   , success: isRight res
+   , db: dbName
+   , result: either toForeign encode res
+   }
+
+  pure res
 
 getHashKey :: forall st rt. String -> String -> String -> BackendFlow st rt (Either Error (Maybe String))
 getHashKey dbName key field = do
@@ -592,7 +683,16 @@ getHashKey dbName key field = do
         ("dbName: " <> dbName <> ", getHashKey, key: " <> key <> ", field: " <> field)
         $ Playback.mkRunKVDBEitherEntry dbName "getHashKey" ("key: " <> key <> ", field: " <> field))
       id
-  pure $ fromDBMaybeResult eRes
+  let res = fromDBMaybeResult eRes
+  eventLog "EventKV"
+   { action: "GetHashKey"
+   , key
+   , field
+   , success: isRight res
+   , db: dbName
+   , result: either toForeign toForeign res
+   }
+  pure res
 
 publishToChannel :: forall st rt. String -> String -> String -> BackendFlow st rt (Either Error Int)
 publishToChannel dbName channel message = do
@@ -603,7 +703,16 @@ publishToChannel dbName channel message = do
         ("dbName: " <> dbName <> ", publishToChannel, channel: " <> channel <> ", message: " <> message)
         $ Playback.mkRunKVDBEitherEntry dbName "publishToChannel" ("channel: " <> channel <> ", message: " <> message))
       id
-  pure $ fromCustomEitherEx eRes
+  let res = fromCustomEitherEx eRes
+  eventLog "EventKV"
+   { action: "PublishToChannel"
+   , channel
+   , message
+   , success: isRight res
+   , db: dbName
+   , result: either toForeign encode res
+   }
+  pure res
 
 -- Not sure about this method.
 -- Should we wrap Unit?
@@ -616,7 +725,15 @@ subscribe dbName channel = do
         ("dbName: " <> dbName <> ", subscribe, channel: " <> channel)
         $ Playback.mkRunKVDBEitherEntry dbName "subscribe" ("channel: " <> channel))
       id
-  pure $ fromCustomEitherExF fromUnitEx eRes
+  let res = fromCustomEitherExF fromUnitEx eRes
+  eventLog "EventKV"
+   { action: "Subscribe"
+   , channel
+   , success: isRight res
+   , db: dbName
+   , result: either toForeign (const (toForeign "Subscribed successfully")) res
+   }
+  pure res
 
 -- Not sure about this method.
 -- Should we wrap Unit?
@@ -629,7 +746,8 @@ enqueue dbName listName value = do
         ("dbName: " <> dbName <> ", enqueue, listName: " <> listName <> ", value: " <> value)
         $ Playback.mkRunKVDBEitherEntry dbName "enqueue" ("listName: " <> listName <> ", value: " <> value))
       id
-  pure $ fromCustomEitherExF fromUnitEx eRes
+  let res = fromCustomEitherExF fromUnitEx eRes
+  pure res
 
 dequeue :: forall st rt. String -> String -> BackendFlow st rt (Either Error (Maybe String))
 dequeue dbName listName = do
