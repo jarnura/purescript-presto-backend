@@ -336,11 +336,12 @@ findOne dbName options =
       $ Playback.mkRunDBEntry dbName "findOne" [Opt.options options] (encode ""))
     id)
   >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action : "FindOne"
-    , query  : Opt.options options
-    , table  : modelName (Proxy :: Proxy model)
-    , db     : dbName
-    , result : fetchDBResult (maybe objectNotFound encode) queryResult
+    { action  : "FindOne"
+    , query   : Opt.options options
+    , table   : modelName (Proxy :: Proxy model)
+    , success : isRight queryResult
+    , db      : dbName
+    , result  : fetchDBResult (maybe objectNotFound encode) queryResult
     }
 
 findAll
@@ -356,11 +357,12 @@ findAll dbName options =
       $ Playback.mkRunDBEntry dbName "findAll" [Opt.options options] (encode ""))
     id)
   >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action : "FindAll"
-    , query  : Opt.options options
-    , table  : modelName (Proxy :: Proxy model)
-    , db     : dbName
-    , result : fetchDBResult encode queryResult
+    { action  : "FindAll"
+    , query   : Opt.options options
+    , table   : modelName (Proxy :: Proxy model)
+    , success : isRight queryResult
+    , db      : dbName
+    , result  : fetchDBResult encode queryResult
     }
 
 query
@@ -559,7 +561,7 @@ getCache dbName key =
   >>= \result → result <$ eventLog "EventKV"
    { action  : "GetCache"
    , key
-   , success : either (const false) isJust result
+   , success : isRight result
    , db      : dbName
    , result  : fetchDBResult (maybe keyNotFound encode) result
    }
@@ -576,7 +578,7 @@ keyExistsCache dbName key =
   >>= \result → result <$ eventLog "EventKV"
    { action  : "KeyExistsCache"
    , key
-   , success : either (const false) id result
+   , success : isRight result
    , db      : dbName
    , result  : fetchDBResult encode result
    }
@@ -611,7 +613,7 @@ expire dbName key ttl =
     { action  : "Expire"
     , key
     , ttl
-    , success : isRight result -- expire result is false means it is success or failure?
+    , success : isRight result
     , db      : dbName
     , result  : fetchDBResult encode result
     }
@@ -628,7 +630,7 @@ incr dbName key =
   >>= \result → result <$ eventLog "EventKV"
    { action  : "Incr"
    , key
-   , success : isRight result -- how to find success, isRight is enough?
+   , success : isRight result
    , db      : dbName
    , result  : fetchDBResult encode result
    }
@@ -665,7 +667,7 @@ getHashKey dbName key field =
    { action  : "GetHashKey"
    , key
    , field
-   , success : either (const false) isJust result
+   , success : isRight result
    , db      : dbName
    , result  : fetchDBResult (maybe (toForeign "Hashkey not found") encode) result
    }
