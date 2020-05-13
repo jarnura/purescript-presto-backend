@@ -37,7 +37,7 @@ import Data.Foreign.Class (class Decode, class Encode, encode)
 import Data.Foreign.Generic (decodeJSON, encodeJSON)
 import Data.Foreign.Generic.Class (class GenericDecode)
 import Data.Generic.Rep (class Generic)
-import Data.Maybe (Maybe(..), maybe)
+import Data.Maybe (Maybe(..), isJust, maybe)
 import Data.Newtype (class Newtype)
 import Data.Options (Options, options, tag)
 import Data.Options (options) as Opt
@@ -65,6 +65,7 @@ import Presto.Backend.Types.Options (class OptionEntity)
 import Presto.Core.Types.Language.Interaction (Interaction)
 import Sequelize.Class (class Model, modelName)
 import Sequelize.Types (Conn, SEQUELIZE)
+import Test.Unit (success)
 import Text.Parsing.Indent (Optional(..))
 import Type.Proxy (Proxy(..))
 
@@ -488,314 +489,284 @@ getKVDBConn dbName = wrap $ GetKVDBConn dbName
 -- Not sure about this method.
 -- Should we wrap Unit?
 setCache :: forall st rt. String -> String ->  String -> BackendFlow st rt (Either Error Unit)
-setCache dbName key value = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toCustomEitherExF toUnitEx <$> KVDB.setCache key value Nothing)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", setCache, key: " <> key <> ", value: " <> value)
-        $ Playback.mkRunKVDBEitherEntry dbName "setCache" ("key: " <> key <> ", value: " <> value))
-      id
-  let res = fromCustomEitherExF fromUnitEx eRes
-  eventLog "EventKV"
-    { action: "SetCache"
+setCache dbName key value =
+  fromCustomEitherExF fromUnitEx <$> (wrap $ RunKVDBEither dbName
+    (toCustomEitherExF toUnitEx <$> KVDB.setCache key value Nothing)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", setCache, key: " <> key <> ", value: " <> value)
+      $ Playback.mkRunKVDBEitherEntry dbName "setCache" ("key: " <> key <> ", value: " <> value))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+    { action  : "SetCache"
     , key
     , value
-    , success: isRight res
-    , db: dbName
-    , result: either toForeign (const (toForeign "Set successfully")) res
+    , success : isRight result
+    , db      : dbName
+    , result  : fetchDBResult (const $ toForeign "Set successfully") result
     }
-  pure res
 
 setCacheWithOpts :: forall st rt. String -> String ->  String -> Maybe Milliseconds -> SetOptions -> BackendFlow st rt (Either Error Boolean)
-setCacheWithOpts dbName key value mbTtl opts = do
-  eRes <- wrap $ RunKVDBEither dbName
-          ((toEitherEx <<< bimap toDBError id) <$> KVDB.setCacheWithOpts key value mbTtl opts)
-          KVDBMock.mkKVDBActionDict
-          (Playback.mkEntryDict
-            ("dbName: " <> dbName <> ", setCacheWithOpts, key: " <> key <> ", value: " <> value <> ", opts: " <> (show opts))
-            $ Playback.mkRunKVDBEitherEntry dbName "setCacheWithOpts" ("key: " <> key <> ", value: " <> value <> ", opts: " <> (show opts)))
-          id
-  let res = (bimap fromDBError id <<< fromEitherEx) eRes
-  eventLog "EventKV"
-    { action: "SetCacheWithOpts"
+setCacheWithOpts dbName key value mbTtl opts =
+  (bimap fromDBError id <<< fromEitherEx) <$> (wrap $ RunKVDBEither dbName
+    ((toEitherEx <<< bimap toDBError id) <$> KVDB.setCacheWithOpts key value mbTtl opts)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", setCacheWithOpts, key: " <> key <> ", value: " <> value <> ", opts: " <> (show opts))
+      $ Playback.mkRunKVDBEitherEntry dbName "setCacheWithOpts" ("key: " <> key <> ", value: " <> value <> ", opts: " <> (show opts)))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+    { action  : "SetCacheWithOpts"
     , key
     , value
-    , ttl: mbTtl
+    , ttl     : mbTtl
     , opts
-    , success: isRight res
-    , db: dbName
-    , result: either toForeign encode res
+    , success : isRight result
+    , db      : dbName
+    , result  : fetchDBResult encode result
     }
-  pure res
 
 -- Not sure about this method.
 -- Should we wrap Unit?
 setCacheWithExpiry :: forall st rt. String -> String -> String -> Milliseconds -> BackendFlow st rt (Either Error Unit)
-setCacheWithExpiry dbName key value ttl = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toCustomEitherExF toUnitEx <$> KVDB.setCache key value (Just ttl))
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", setCacheWithExpiry, key: " <> key <> ", value: " <> value <> ", ttl: " <> show ttl)
-        $ Playback.mkRunKVDBEitherEntry dbName "setCacheWithExpiry" ("key: " <> key <> ", value: " <> value <> ", ttl: " <> show ttl))
-      id
-  let res = fromCustomEitherExF fromUnitEx eRes
-  eventLog "EventKV"
-    { action: "SetCacheWithExpiry"
+setCacheWithExpiry dbName key value ttl =
+  fromCustomEitherExF fromUnitEx <$> (wrap $ RunKVDBEither dbName
+    (toCustomEitherExF toUnitEx <$> KVDB.setCache key value (Just ttl))
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", setCacheWithExpiry, key: " <> key <> ", value: " <> value <> ", ttl: " <> show ttl)
+      $ Playback.mkRunKVDBEitherEntry dbName "setCacheWithExpiry" ("key: " <> key <> ", value: " <> value <> ", ttl: " <> show ttl))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+    { action  : "SetCacheWithExpiry"
     , key
     , value
     , ttl
-    , success: isRight res
-    , db: dbName
-    , result: either toForeign (const (toForeign "Set successfully")) res
+    , success : isRight result
+    , db      : dbName
+    , result  : fetchDBResult (const $ toForeign "Set successfully") result
     }
-  pure res
 
 getCache :: forall st rt. String -> String -> BackendFlow st rt (Either Error (Maybe String))
-getCache dbName key = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toDBMaybeResult <$> KVDB.getCache key)
-      KVDBMock.mkKVDBActionDict
+getCache dbName key =
+  fromDBMaybeResult <$> (wrap $ RunKVDBEither dbName
+    (toDBMaybeResult <$> KVDB.getCache key)
+    KVDBMock.mkKVDBActionDict
       (Playback.mkEntryDict
         ("dbName: " <> dbName <> ", getCache, key: " <> key)
         $ Playback.mkRunKVDBEitherEntry dbName "getCache" ("key: " <> key))
-      id
-  let res = fromDBMaybeResult eRes
-  eventLog "EventKV"
-   { action: "GetCache"
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+   { action  : "GetCache"
    , key
-   , success: isRight res
-   , db: dbName
-   , result: either toForeign (maybe (toForeign "Key not found") encode) res
+   , success : either (const false) isJust result
+   , db      : dbName
+   , result  : fetchDBResult (maybe keyNotFound encode) result
    }
-  pure res
 
 keyExistsCache :: forall st rt. String -> String -> BackendFlow st rt (Either Error Boolean)
-keyExistsCache dbName key = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toCustomEitherEx <$> KVDB.keyExistsCache key)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", keyExistsCache, key: " <> key)
-        $ Playback.mkRunKVDBEitherEntry dbName "keyExistsCache" ("key: " <> key))
-      id
-  let res = fromCustomEitherEx eRes
-  eventLog "EventKV"
-   { action: "KeyExistsCache"
+keyExistsCache dbName key =
+  fromCustomEitherEx <$> (wrap $ RunKVDBEither dbName
+    (toCustomEitherEx <$> KVDB.keyExistsCache key)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", keyExistsCache, key: " <> key)
+      $ Playback.mkRunKVDBEitherEntry dbName "keyExistsCache" ("key: " <> key))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+   { action  : "KeyExistsCache"
    , key
-   , success: isRight res
-   , db: dbName
-   , result: either toForeign encode res
+   , success : either (const false) id result
+   , db      : dbName
+   , result  : fetchDBResult encode result
    }
-  pure res
 
 delCache :: forall st rt. String -> String -> BackendFlow st rt (Either Error Int)
-delCache dbName key = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toCustomEitherEx <$> KVDB.delCache key)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", delCache, key: " <> key)
-        $ Playback.mkRunKVDBEitherEntry dbName "delCache" ("key: " <> key))
-      id
-  let res = fromCustomEitherEx eRes
-  eventLog "EventKV"
-   { action: "DelCache"
+delCache dbName key =
+  fromCustomEitherEx <$> (wrap $ RunKVDBEither dbName
+    (toCustomEitherEx <$> KVDB.delCache key)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", delCache, key: " <> key)
+      $ Playback.mkRunKVDBEitherEntry dbName "delCache" ("key: " <> key))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+   { action  : "DelCache"
    , key
-   , success: isRight res
-   , db: dbName
-   , result: either toForeign encode res
+   , success : isRight result
+   , db      : dbName
+   , result  : fetchDBResult encode result
    }
-  pure res
 
 expire :: forall st rt. String -> String -> Seconds -> BackendFlow st rt (Either Error Boolean)
-expire dbName key ttl = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toCustomEitherEx <$> KVDB.expire key ttl)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", delCache, key: " <> key <> ", ttl: " <> show ttl)
-        $ Playback.mkRunKVDBEitherEntry dbName "expire" ("key: " <> key <> ", ttl: " <> show ttl))
-      id
-  let res = fromCustomEitherEx eRes
-  eventLog "EventKV"
-    { action: "Expire"
+expire dbName key ttl =
+  fromCustomEitherEx <$> (wrap $ RunKVDBEither dbName
+    (toCustomEitherEx <$> KVDB.expire key ttl)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", delCache, key: " <> key <> ", ttl: " <> show ttl)
+      $ Playback.mkRunKVDBEitherEntry dbName "expire" ("key: " <> key <> ", ttl: " <> show ttl))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+    { action  : "Expire"
     , key
     , ttl
-    , success: isRight res
-    , db: dbName
-    , result: either toForeign encode res
+    , success : isRight result -- expire result is false means it is success or failure?
+    , db      : dbName
+    , result  : fetchDBResult encode result
     }
-  pure res
 
 incr :: forall st rt. String -> String -> BackendFlow st rt (Either Error Int)
-incr dbName key = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toCustomEitherEx <$> KVDB.incr key)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", incr, key: " <> key)
-        $ Playback.mkRunKVDBEitherEntry dbName "incr" ("key: " <> key))
-      id
-  let res = fromCustomEitherEx eRes
-  eventLog "EventKV"
-   { action: "Incr"
+incr dbName key =
+  fromCustomEitherEx <$> (wrap $ RunKVDBEither dbName
+    (toCustomEitherEx <$> KVDB.incr key)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", incr, key: " <> key)
+      $ Playback.mkRunKVDBEitherEntry dbName "incr" ("key: " <> key))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+   { action  : "Incr"
    , key
-   , success: isRight res
-   , db: dbName
-   , result: either toForeign encode res
+   , success : isRight result -- how to find success, isRight is enough?
+   , db      : dbName
+   , result  : fetchDBResult encode result
    }
-  pure res
 
 setHash :: forall st rt. String -> String -> String -> String -> BackendFlow st rt (Either Error Boolean)
-setHash dbName key field value = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toCustomEitherEx <$> KVDB.setHash key field value)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", setHash, key: " <> key <> ", field: " <> field <> ", value: " <> value)
-        $ Playback.mkRunKVDBEitherEntry dbName "setHash" ("key: " <> key <> ", field: " <> field <> ", value: " <> value))
-      id
-  let res = fromCustomEitherEx eRes
-  eventLog "EventKV"
-   { action: "SetHash"
+setHash dbName key field value =
+  fromCustomEitherEx <$> (wrap $ RunKVDBEither dbName
+    (toCustomEitherEx <$> KVDB.setHash key field value)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", setHash, key: " <> key <> ", field: " <> field <> ", value: " <> value)
+      $ Playback.mkRunKVDBEitherEntry dbName "setHash" ("key: " <> key <> ", field: " <> field <> ", value: " <> value))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+   { action  : "SetHash"
    , key
    , field
    , value
-   , success: isRight res
-   , db: dbName
-   , result: either toForeign encode res
+   , success : isRight result
+   , db      : dbName
+   , result  : fetchDBResult encode result
    }
-
-  pure res
 
 getHashKey :: forall st rt. String -> String -> String -> BackendFlow st rt (Either Error (Maybe String))
-getHashKey dbName key field = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toDBMaybeResult <$> KVDB.getHashKey key field)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", getHashKey, key: " <> key <> ", field: " <> field)
-        $ Playback.mkRunKVDBEitherEntry dbName "getHashKey" ("key: " <> key <> ", field: " <> field))
-      id
-  let res = fromDBMaybeResult eRes
-  eventLog "EventKV"
-   { action: "GetHashKey"
+getHashKey dbName key field =
+  fromDBMaybeResult <$> (wrap $ RunKVDBEither dbName
+    (toDBMaybeResult <$> KVDB.getHashKey key field)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", getHashKey, key: " <> key <> ", field: " <> field)
+      $ Playback.mkRunKVDBEitherEntry dbName "getHashKey" ("key: " <> key <> ", field: " <> field))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+   { action  : "GetHashKey"
    , key
    , field
-   , success: isRight res
-   , db: dbName
-   , result: either toForeign (maybe (toForeign "Hashkey not found") encode)  res
+   , success : either (const false) isJust result
+   , db      : dbName
+   , result  : fetchDBResult (maybe (toForeign "Hashkey not found") encode) result
    }
-  pure res
 
 publishToChannel :: forall st rt. String -> String -> String -> BackendFlow st rt (Either Error Int)
-publishToChannel dbName channel message = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toCustomEitherEx <$> KVDB.publishToChannel channel message)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", publishToChannel, channel: " <> channel <> ", message: " <> message)
-        $ Playback.mkRunKVDBEitherEntry dbName "publishToChannel" ("channel: " <> channel <> ", message: " <> message))
-      id
-  let res = fromCustomEitherEx eRes
-  eventLog "EventKV"
-   { action: "PublishToChannel"
+publishToChannel dbName channel message =
+  fromCustomEitherEx <$> (wrap $ RunKVDBEither dbName
+    (toCustomEitherEx <$> KVDB.publishToChannel channel message)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", publishToChannel, channel: " <> channel <> ", message: " <> message)
+      $ Playback.mkRunKVDBEitherEntry dbName "publishToChannel" ("channel: " <> channel <> ", message: " <> message))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+   { action  : "PublishToChannel"
    , channel
    , message
-   , success: isRight res
-   , db: dbName
-   , result: either toForeign encode res
+   , success : isRight result
+   , db      : dbName
+   , result  : fetchDBResult encode result
    }
-  pure res
 
 -- Not sure about this method.
 -- Should we wrap Unit?
 subscribe :: forall st rt. String -> String -> BackendFlow st rt (Either Error Unit)
-subscribe dbName channel = do
- fromCustomEitherExF fromUnitEx <$> (wrap $ RunKVDBEither dbName
-      (toCustomEitherExF toUnitEx <$> KVDB.subscribe channel)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", subscribe, channel: " <> channel)
-        $ Playback.mkRunKVDBEitherEntry dbName "subscribe" ("channel: " <> channel))
-      id)
+subscribe dbName channel =
+  fromCustomEitherExF fromUnitEx <$> (wrap $ RunKVDBEither dbName
+    (toCustomEitherExF toUnitEx <$> KVDB.subscribe channel)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", subscribe, channel: " <> channel)
+      $ Playback.mkRunKVDBEitherEntry dbName "subscribe" ("channel: " <> channel))
+    id)
   >>= \result → result <$ eventLog "EventKV"
-   { action: "Subscribe"
+   { action  : "Subscribe"
    , channel
-   , success: isRight result
-   , db: dbName
-   , result: either toForeign (const (toForeign "Subscribed successfully")) result
+   , success : isRight result
+   , db      : dbName
+   , result  : fetchDBResult (const $ toForeign "Subscribed successfully") result
    }
 
 -- Not sure about this method.
 -- Should we wrap Unit?
 enqueue :: forall st rt. String -> String -> String -> BackendFlow st rt (Either Error Unit)
-enqueue dbName listName value = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toCustomEitherExF toUnitEx <$> KVDB.enqueue listName value)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", enqueue, listName: " <> listName <> ", value: " <> value)
-        $ Playback.mkRunKVDBEitherEntry dbName "enqueue" ("listName: " <> listName <> ", value: " <> value))
-      id
-  let res = fromCustomEitherExF fromUnitEx eRes
-  eventLog "EventKV"
-   { action: "Enqueue"
-   , list: listName
+enqueue dbName listName value =
+  fromCustomEitherExF fromUnitEx <$> (wrap $ RunKVDBEither dbName
+    (toCustomEitherExF toUnitEx <$> KVDB.enqueue listName value)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", enqueue, listName: " <> listName <> ", value: " <> value)
+      $ Playback.mkRunKVDBEitherEntry dbName "enqueue" ("listName: " <> listName <> ", value: " <> value))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+   { action  : "Enqueue"
+   , list    : listName
    , value
-   , success: isRight res
-   , db: dbName
-   , result: either toForeign (const (toForeign "Enqueued successfully")) res
+   , success : isRight result
+   , db      : dbName
+   , result  : fetchDBResult (const $ toForeign "Enqueued successfully") result
    }
-  pure res
 
 dequeue :: forall st rt. String -> String -> BackendFlow st rt (Either Error (Maybe String))
-dequeue dbName listName = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toDBMaybeResult <$> KVDB.dequeue listName)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", dequeue, listName: " <> listName)
-        $ Playback.mkRunKVDBEitherEntry dbName "dequeue" ("listName: " <> listName))
-      id
-  let res = fromDBMaybeResult eRes
-  eventLog "EventKV"
-    { action: "Dequeue"
-    , list: listName
-    , success: isRight res
-    , db: dbName
-    , result: either toForeign (maybe (toForeign "Not found") encode) res
+dequeue dbName listName =
+  fromDBMaybeResult <$> (wrap $ RunKVDBEither dbName
+    (toDBMaybeResult <$> KVDB.dequeue listName)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", dequeue, listName: " <> listName)
+      $ Playback.mkRunKVDBEitherEntry dbName "dequeue" ("listName: " <> listName))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+    { action  : "Dequeue"
+    , list    : listName
+    , success : isRight result
+    , db      : dbName
+    , result  : fetchDBResult (maybe (toForeign "Not found") encode) result
     }
-  pure res
 
 getQueueIdx :: forall st rt. String -> String -> Int -> BackendFlow st rt (Either Error (Maybe String))
-getQueueIdx dbName listName index = do
-  eRes <- wrap $ RunKVDBEither dbName
-      (toDBMaybeResult <$> KVDB.getQueueIdx listName index)
-      KVDBMock.mkKVDBActionDict
-      (Playback.mkEntryDict
-        ("dbName: " <> dbName <> ", getQueueIdx, listName: " <> listName <> ", idx: " <> show index)
-        $ Playback.mkRunKVDBEitherEntry dbName "getQueueIdx" ("listName: " <> listName <> ", idx: " <> show index))
-      id
-  let res = fromDBMaybeResult eRes
-  eventLog "EventKV"
-    { action: "GetQueueIdx"
-    , list: listName
+getQueueIdx dbName listName index =
+  fromDBMaybeResult <$> (wrap $ RunKVDBEither dbName
+    (toDBMaybeResult <$> KVDB.getQueueIdx listName index)
+    KVDBMock.mkKVDBActionDict
+    (Playback.mkEntryDict
+      ("dbName: " <> dbName <> ", getQueueIdx, listName: " <> listName <> ", idx: " <> show index)
+      $ Playback.mkRunKVDBEitherEntry dbName "getQueueIdx" ("listName: " <> listName <> ", idx: " <> show index))
+    id)
+  >>= \result → result <$ eventLog "EventKV"
+    { action  : "GetQueueIdx"
+    , list    : listName
     , index
-    , success: isRight res
-    , db: dbName
-    , result: either toForeign (maybe (toForeign "Not found") encode) res
+    , success : isRight result
+    , db      : dbName
+    , result  : fetchDBResult (maybe (toForeign "Not found") encode) result
     }
-  pure res
-
 
 -- Multi methods
 
 newMulti :: forall st rt. String -> BackendFlow st rt Multi
 newMulti dbName = do
-  res <-
+  result <-
     wrap $ RunKVDBSimple dbName
       KVDB.newMulti
       KVDBMock.mkKVDBActionDict
@@ -803,17 +774,16 @@ newMulti dbName = do
         ("dbName: " <> dbName <> ", newMulti")
         $ Playback.mkRunKVDBSimpleEntry dbName "newMulti" "")
       id
-  eventLog "EventKVMulti"
-   { action: "NewMulti"
-   , db: dbName
-   , result: encode res
-   }
-  pure res
+  result <$ eventLog "EventKVMulti"
+    { action : "NewMulti"
+    , db     : dbName
+    , result : encode result
+    }
 
 setCacheInMulti :: forall st rt. String -> String -> Multi -> BackendFlow st rt Multi
 setCacheInMulti key value multi = do
   let dbName = KVDB.getKVDBName multi
-  res <-
+  result <-
     wrap $ RunKVDBSimple dbName
       (KVDB.setCacheInMulti key value Nothing multi)
       KVDBMock.mkKVDBActionDict
@@ -821,14 +791,13 @@ setCacheInMulti key value multi = do
         ("dbName: " <> dbName <> ", setCacheInMulti, key: " <> key <> ", value: " <> value <> ", multi: " <> show multi)
         $ Playback.mkRunKVDBSimpleEntry dbName "setCacheInMulti" ("key: " <> key <> ", value: " <> value <> ", multi: " <> show multi))
       id
-  eventLog "EventKVMulti"
-    { action: "SetCacheInMulti"
+  result <$ eventLog "EventKVMulti"
+    { action : "SetCacheInMulti"
     , key
     , value
     , multi
-    , result: res
+    , result : result
     }
-  pure res
 
 -- Why this function returns Multi???
 getCacheInMulti :: forall st rt. String -> Multi -> BackendFlow st rt Multi
@@ -1009,6 +978,9 @@ fetchDBResult = either (toForeign <<< show)
 
 objectNotFound :: Foreign
 objectNotFound = toForeign "OBJECT NOT FOUND"
+
+keyNotFound :: Foreign
+keyNotFound = toForeign "KEY NOT FOUND"
 
 encodeE :: ∀ a b. Encode a ⇒ Encode b ⇒ Either a b → Foreign
 encodeE = encodeEWith encode
