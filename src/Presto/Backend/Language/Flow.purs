@@ -226,13 +226,12 @@ callAPI headers request = wrap
         (encodeJSON $ makeRequest request headers)
         (Playback.mkCallAPIEntry (\_ -> encode $ makeRequest request headers)))
       id)
-  >>= \response → response
-    <$ eventLog "EventCallApi"
-        { requestPayloadJson: encode request
-        , request: encode $ makeRequest request headers
-        , success: isRight response
-        , response : encodeEither response
-        }
+  >>= \response → response <$ eventLog "EventCallApi"
+    { requestPayloadJson : encode request
+    , request            : encode $ makeRequest request headers
+    , success            : isRight response
+    , response           : encodeE response
+    }
 
 callAPIGeneric
   :: ∀ st rt a b err x
@@ -252,13 +251,12 @@ callAPIGeneric headers request = wrap
       (encodeJSON $ makeRequest request headers)
       (Playback.mkCallAPIGenericEntry (\_ → encode $ makeRequest request headers)))
     id)
-  >>= \response →  response
-    <$ eventLog "EventCallApiGeneric"
-        { requestPayloadJson: encode request
-        , request: encode $ makeRequest request headers
-        , success: either (const false) isRight
-        , response: either encode encodeEither response
-        }
+  >>= \response →  response <$ eventLog "EventCallApiGeneric"
+    { requestPayloadJson : encode request
+    , request            : encode $ makeRequest request headers
+    , success            : either (const false) isRight
+    , response           : encodeEWith encodeE response
+    }
 
 doAff :: forall st rt a. (forall eff. BackendAff eff a) -> BackendFlow st rt a
 doAff aff = wrap $ DoAff aff id
@@ -338,10 +336,10 @@ findOne dbName options =
     id)
   >>= \queryResult → queryResult <$ eventLog "EventDB"
     { action : "FindOne"
-    , query: Opt.options options
-    , table: modelName (Proxy :: Proxy model)
-    , db: dbName
-    , result: either (toForeign <<< show) (maybe (toForeign "Object not found") $ encode) queryResult
+    , query  : Opt.options options
+    , table  : modelName (Proxy :: Proxy model)
+    , db     : dbName
+    , result : fetchDBResult (maybe objectNotFound encode) queryResult
     }
 
 findAll
@@ -357,11 +355,11 @@ findAll dbName options =
       $ Playback.mkRunDBEntry dbName "findAll" [Opt.options options] (encode ""))
     id)
   >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action: "FindAll"
-    , query: Opt.options options
-    , table: modelName (Proxy :: Proxy model)
-    , db: dbName
-    , result: either toForeign encode queryResult
+    { action : "FindAll"
+    , query  : Opt.options options
+    , table  : modelName (Proxy :: Proxy model)
+    , db     : dbName
+    , result : fetchDBResult encode queryResult
     }
 
 query
@@ -371,24 +369,23 @@ query
   => Newtype a {|r}
   => String -> String -> BackendFlow st rt (Either Error (Array a))
 query dbName rawq =
- fromCustomEitherEx <$> (wrap $ RunDB dbName
+  fromCustomEitherEx <$> (wrap $ RunDB dbName
     (\conn -> toCustomEitherEx <$> DB.query conn rawq)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkQuery dbName)
     (Playback.mkEntryDict
         (dbName <> ", rawq: " <> rawq)
         $ Playback.mkRunDBEntry dbName "query" [toForeign rawq] (encode ""))
     id)
- >>= \queryResult → queryResult
-  <$ eventLog "EventDB"
-    { action: "Query"
-    , rawQuery: rawq
-    , db: dbName
-    , result: either toForeign encode queryResult
+  >>= \queryResult → queryResult <$ eventLog "EventDB"
+    { action   : "Query"
+    , rawQuery : rawq
+    , db       : dbName
+    , result   : fetchDBResult encode queryResult
     }
 
 create :: forall model st rt. Model model => String -> model -> BackendFlow st rt (Either Error (Maybe model))
 create dbName model =
- fromDBMaybeResult <$> (wrap $ RunDB dbName
+  fromDBMaybeResult <$> (wrap $ RunDB dbName
     (\conn -> toDBMaybeResult <$> DB.create conn model)
     (\connMock -> SqlDBMock.mkDbActionDict $ SqlDBMock.mkCreate dbName)
     (Playback.mkEntryDict
@@ -396,12 +393,12 @@ create dbName model =
       $ Playback.mkRunDBEntry dbName "create" [] (encode model))
     id)
   >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action: "Create"
-    , data: encode model
-    , table: modelName (Proxy :: Proxy model)
-    , success: isRight queryResult
-    , db: dbName
-    , result: either toForeign (maybe (toForeign "Object not found") encode) queryResult
+    { action  : "Create"
+    , data    : encode model
+    , table   : modelName (Proxy :: Proxy model)
+    , success : isRight queryResult
+    , db      : dbName
+    , result  : fetchDBResult (maybe objectNotFound encode) queryResult
     }
 
 createWithOpts :: forall model st rt. Model model => String -> model -> Options model -> BackendFlow st rt (Either Error (Maybe model))
@@ -414,13 +411,13 @@ createWithOpts dbName model options =
       $ Playback.mkRunDBEntry dbName "createWithOpts" [Opt.options options] (encode model))
     id)
   >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action: "CreateWithOpts"
-    , data: encode model
-    , options: Opt.options options
-    , table: modelName (Proxy :: Proxy model)
-    , success: isRight queryResult
-    , db: dbName
-    , result : either toForeign (maybe (toForeign "Object not found") encode) queryResult
+    { action  : "CreateWithOpts"
+    , data    : encode model
+    , options : Opt.options options
+    , table   : modelName (Proxy :: Proxy model)
+    , success : isRight queryResult
+    , db      : dbName
+    , result  : fetchDBResult (maybe objectNotFound encode) queryResult
     }
 
 
@@ -434,14 +431,14 @@ update dbName updateValues whereClause =
       $ Playback.mkRunDBEntry dbName "update" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
     id)
   >>= \queryResult → queryResult <$ eventLog "EventDB"
-        { action: "Update"
-        , query: Opt.options whereClause
-        , data: Opt.options updateValues
-        , table: modelName (Proxy :: Proxy model)
-        , success: isRight queryResult
-        , db: dbName
-        , result: either toForeign encode queryResult
-        }
+    { action  : "Update"
+    , query   : Opt.options whereClause
+    , data    : Opt.options updateValues
+    , table   : modelName (Proxy :: Proxy model)
+    , success : isRight queryResult
+    , db      : dbName
+    , result  : fetchDBResult encode queryResult
+    }
 
 
 update' :: forall model st rt. Model model => String -> Options model -> Options model -> BackendFlow st rt (Either Error Int)
@@ -454,14 +451,14 @@ update' dbName updateValues whereClause =
       $ Playback.mkRunDBEntry dbName "update'" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
     id)
   >>= \queryResult → queryResult <$ eventLog "EventDB"
-        { action: "Update'"
-        , query: Opt.options whereClause
-        , data: Opt.options updateValues
-        , table: modelName (Proxy :: Proxy model)
-        , success: isRight queryResult
-        , db: dbName
-        , result : either toForeign encode queryResult
-        }
+    { action  : "Update'"
+    , query   : Opt.options whereClause
+    , data    : Opt.options updateValues
+    , table   : modelName (Proxy :: Proxy model)
+    , success : isRight queryResult
+    , db      : dbName
+    , result  : fetchDBResult encode queryResult
+    }
 
 delete :: forall model st rt. Model model => String -> Options model -> BackendFlow st rt (Either Error Int)
 delete dbName options =
@@ -472,15 +469,14 @@ delete dbName options =
       ("dbName: " <> dbName <> ", delete, opts: " <> encodeJSON (Opt.options options))
       $ Playback.mkRunDBEntry dbName "delete" [Opt.options options] (encode ""))
     id)
-  >>= \queryResult -> queryResult <$
-    eventLog "EventDB"
-      { action: "Delete"
-      , query: Opt.options options
-      , table: modelName (Proxy :: Proxy model)
-      , success: isRight queryResult
-      , db: dbName
-      , result: either toForeign encode queryResult
-      }
+  >>= \queryResult -> queryResult <$ eventLog "EventDB"
+    { action  : "Delete"
+    , query   : Opt.options options
+    , table   : modelName (Proxy :: Proxy model)
+    , success : isRight queryResult
+    , db      : dbName
+    , result  : fetchDBResult encode queryResult
+    }
 
 getKVDBConn :: forall st rt. String -> BackendFlow st rt KVDBConn
 getKVDBConn dbName = wrap $ GetKVDBConn dbName
@@ -718,22 +714,20 @@ publishToChannel dbName channel message = do
 -- Should we wrap Unit?
 subscribe :: forall st rt. String -> String -> BackendFlow st rt (Either Error Unit)
 subscribe dbName channel = do
-  eRes <- wrap $ RunKVDBEither dbName
+ fromCustomEitherExF fromUnitEx <$> (wrap $ RunKVDBEither dbName
       (toCustomEitherExF toUnitEx <$> KVDB.subscribe channel)
       KVDBMock.mkKVDBActionDict
       (Playback.mkEntryDict
         ("dbName: " <> dbName <> ", subscribe, channel: " <> channel)
         $ Playback.mkRunKVDBEitherEntry dbName "subscribe" ("channel: " <> channel))
-      id
-  let res = fromCustomEitherExF fromUnitEx eRes
-  eventLog "EventKV"
+      id)
+  >>= \result → result <$ eventLog "EventKV"
    { action: "Subscribe"
    , channel
-   , success: isRight res
+   , success: isRight result
    , db: dbName
-   , result: either toForeign (const (toForeign "Subscribed successfully")) res
+   , result: either toForeign (const (toForeign "Subscribed successfully")) result
    }
-  pure res
 
 -- Not sure about this method.
 -- Should we wrap Unit?
@@ -968,5 +962,14 @@ setMessageHandler dbName f = do
         $ Playback.mkRunKVDBSimpleEntry dbName "setMessageHandler" "")
       id
 
-encodeEither :: ∀ a b. Encode a ⇒ Encode b ⇒ Either a b → Foreign
-encodeEither = either encode encode
+fetchDBResult :: ∀ a. (a → Foreign) → Either Error a → Foreign
+fetchDBResult = either (toForeign <<< show)
+
+objectNotFound :: Foreign
+objectNotFound = toForeign "OBJECT NOT FOUND"
+
+encodeE :: ∀ a b. Encode a ⇒ Encode b ⇒ Either a b → Foreign
+encodeE = encodeEWith encode
+
+encodeEWith :: ∀ a b. Encode a ⇒ (b → Foreign) → Either a b → Foreign
+encodeEWith = either encode
