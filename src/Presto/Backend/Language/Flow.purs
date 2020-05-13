@@ -567,7 +567,7 @@ getCache dbName key = do
    , key
    , success: isRight res
    , db: dbName
-   , result: either toForeign toForeign res
+   , result: either toForeign (maybe (toForeign "Key not found") encode) res
    }
   pure res
 
@@ -686,7 +686,7 @@ getHashKey dbName key field = do
    , field
    , success: isRight res
    , db: dbName
-   , result: either toForeign toForeign res
+   , result: either toForeign (maybe (toForeign "Hashkey not found") encode)  res
    }
   pure res
 
@@ -741,6 +741,14 @@ enqueue dbName listName value = do
         $ Playback.mkRunKVDBEitherEntry dbName "enqueue" ("listName: " <> listName <> ", value: " <> value))
       id
   let res = fromCustomEitherExF fromUnitEx eRes
+  eventLog "EventKV"
+   { action: "Enqueue"
+   , list: listName
+   , value
+   , success: isRight res
+   , db: dbName
+   , result: either toForeign (const (toForeign "Enqueued successfully")) res
+   }
   pure res
 
 dequeue :: forall st rt. String -> String -> BackendFlow st rt (Either Error (Maybe String))
@@ -752,7 +760,15 @@ dequeue dbName listName = do
         ("dbName: " <> dbName <> ", dequeue, listName: " <> listName)
         $ Playback.mkRunKVDBEitherEntry dbName "dequeue" ("listName: " <> listName))
       id
-  pure $ fromDBMaybeResult eRes
+  let res = fromDBMaybeResult eRes
+  eventLog "EventKV"
+    { action: "Dequeue"
+    , list: listName
+    , success: isRight res
+    , db: dbName
+    , result: either toForeign (maybe (toForeign "Not found") encode) res
+    }
+  pure res
 
 getQueueIdx :: forall st rt. String -> String -> Int -> BackendFlow st rt (Either Error (Maybe String))
 getQueueIdx dbName listName index = do
@@ -763,30 +779,56 @@ getQueueIdx dbName listName index = do
         ("dbName: " <> dbName <> ", getQueueIdx, listName: " <> listName <> ", idx: " <> show index)
         $ Playback.mkRunKVDBEitherEntry dbName "getQueueIdx" ("listName: " <> listName <> ", idx: " <> show index))
       id
-  pure $ fromDBMaybeResult eRes
+  let res = fromDBMaybeResult eRes
+  eventLog "EventKV"
+    { action: "GetQueueIdx"
+    , list: listName
+    , index
+    , success: isRight res
+    , db: dbName
+    , result: either toForeign (maybe (toForeign "Not found") encode) res
+    }
+  pure res
+
 
 -- Multi methods
 
 newMulti :: forall st rt. String -> BackendFlow st rt Multi
-newMulti dbName =
-  wrap $ RunKVDBSimple dbName
-    KVDB.newMulti
-    KVDBMock.mkKVDBActionDict
-    (Playback.mkEntryDict
-      ("dbName: " <> dbName <> ", newMulti")
-      $ Playback.mkRunKVDBSimpleEntry dbName "newMulti" "")
-    id
+newMulti dbName = do
+  res <-
+    wrap $ RunKVDBSimple dbName
+      KVDB.newMulti
+      KVDBMock.mkKVDBActionDict
+      (Playback.mkEntryDict
+        ("dbName: " <> dbName <> ", newMulti")
+        $ Playback.mkRunKVDBSimpleEntry dbName "newMulti" "")
+      id
+  eventLog "EventKVMulti"
+   { action: "NewMulti"
+   , db: dbName
+   , result: encode res
+   }
+  pure res
 
 setCacheInMulti :: forall st rt. String -> String -> Multi -> BackendFlow st rt Multi
-setCacheInMulti key value multi = let
-  dbName = KVDB.getKVDBName multi
-  in wrap $ RunKVDBSimple dbName
-    (KVDB.setCacheInMulti key value Nothing multi)
-    KVDBMock.mkKVDBActionDict
-    (Playback.mkEntryDict
-      ("dbName: " <> dbName <> ", setCacheInMulti, key: " <> key <> ", value: " <> value <> ", multi: " <> show multi)
-      $ Playback.mkRunKVDBSimpleEntry dbName "setCacheInMulti" ("key: " <> key <> ", value: " <> value <> ", multi: " <> show multi))
-    id
+setCacheInMulti key value multi = do
+  let dbName = KVDB.getKVDBName multi
+  res <-
+    wrap $ RunKVDBSimple dbName
+      (KVDB.setCacheInMulti key value Nothing multi)
+      KVDBMock.mkKVDBActionDict
+      (Playback.mkEntryDict
+        ("dbName: " <> dbName <> ", setCacheInMulti, key: " <> key <> ", value: " <> value <> ", multi: " <> show multi)
+        $ Playback.mkRunKVDBSimpleEntry dbName "setCacheInMulti" ("key: " <> key <> ", value: " <> value <> ", multi: " <> show multi))
+      id
+  eventLog "EventKVMulti"
+    { action: "SetCacheInMulti"
+    , key
+    , value
+    , multi
+    , result: res
+    }
+  pure res
 
 -- Why this function returns Multi???
 getCacheInMulti :: forall st rt. String -> Multi -> BackendFlow st rt Multi
