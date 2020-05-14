@@ -38,7 +38,7 @@ import Data.Foreign.Generic (decodeJSON, encodeJSON)
 import Data.Foreign.Generic.Class (class GenericDecode)
 import Data.Generic.Rep (class Generic)
 import Data.Maybe (Maybe(..), isJust, maybe)
-import Data.Newtype (class Newtype)
+import Data.Newtype (class Newtype, unwrap)
 import Data.Options (Options, options, tag)
 import Data.Options (options) as Opt
 import Data.String (null)
@@ -65,8 +65,7 @@ import Presto.Backend.Types.Options (class OptionEntity)
 import Presto.Core.Types.Language.Interaction (Interaction)
 import Sequelize.Class (class Model, modelName)
 import Sequelize.Types (Conn, SEQUELIZE)
-import Test.Unit (success)
-import Text.Parsing.Indent (Optional(..))
+import Sequelize.Types as SeqTypes
 import Type.Proxy (Proxy(..))
 
 data BackendFlowCommands next st rt s
@@ -227,8 +226,9 @@ callAPI headers request = wrap
         (encodeJSON $ makeRequest request headers)
         (Playback.mkCallAPIEntry (\_ -> encode $ makeRequest request headers)))
       id)
-  >>= \response → response <$ eventLog "EventCallApi"
-    { requestPayloadJson : encode request
+  >>= \response → response <$ eventLog apiEvent
+    { action             : "callAPI"
+    , requestPayloadJson : encode request
     , request            : encode $ makeRequest request headers
     , success            : isRight response
     , response           : encodeE response
@@ -252,10 +252,11 @@ callAPIGeneric headers request = wrap
       (encodeJSON $ makeRequest request headers)
       (Playback.mkCallAPIGenericEntry (\_ → encode $ makeRequest request headers)))
     id)
-  >>= \response →  response <$ eventLog "EventCallApiGeneric"
-    { requestPayloadJson : encode request
+  >>= \response →  response <$ eventLog apiEvent
+    { action             : "callAPIGeneric"
+    , requestPayloadJson : encode request
     , request            : encode $ makeRequest request headers
-    , success            : either (const false) isRight
+    , success            : either (const false) isRight response
     , response           : encodeEWith encodeE response
     }
 
@@ -335,8 +336,8 @@ findOne dbName options =
       (dbName <> ", query: findOne, opts: " <> encodeJSON (Opt.options options) )
       $ Playback.mkRunDBEntry dbName "findOne" [Opt.options options] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action  : "FindOne"
+  >>= \queryResult → queryResult <$ eventLog dbEvent
+    { action  : "findOne"
     , query   : Opt.options options
     , table   : modelName (Proxy :: Proxy model)
     , success : isRight queryResult
@@ -356,8 +357,8 @@ findAll dbName options =
       (dbName <> ", query: findAll, opts: " <> encodeJSON (Opt.options options) )
       $ Playback.mkRunDBEntry dbName "findAll" [Opt.options options] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action  : "FindAll"
+  >>= \queryResult → queryResult <$ eventLog dbEvent
+    { action  : "findAll"
     , query   : Opt.options options
     , table   : modelName (Proxy :: Proxy model)
     , success : isRight queryResult
@@ -379,9 +380,9 @@ query dbName rawq =
         (dbName <> ", rawq: " <> rawq)
         $ Playback.mkRunDBEntry dbName "query" [toForeign rawq] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action   : "Query"
-    , rawQuery : rawq
+  >>= \queryResult → queryResult <$ eventLog dbEvent
+    { action   : "query"
+    , query    : rawq
     , db       : dbName
     , result   : fetchDBResult encode queryResult
     }
@@ -395,8 +396,8 @@ create dbName model =
       ("dbName: " <> dbName <> ", create " <> encodeJSON model)
       $ Playback.mkRunDBEntry dbName "create" [] (encode model))
     id)
-  >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action  : "Create"
+  >>= \queryResult → queryResult <$ eventLog dbEvent
+    { action  : "create"
     , data    : encode model
     , table   : modelName (Proxy :: Proxy model)
     , success : isRight queryResult
@@ -413,8 +414,8 @@ createWithOpts dbName model options =
       ("dbName: " <> dbName <> ", createWithOpts " <> encodeJSON model <> ", opts: " <> encodeJSON (Opt.options options))
       $ Playback.mkRunDBEntry dbName "createWithOpts" [Opt.options options] (encode model))
     id)
-  >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action  : "CreateWithOpts"
+  >>= \queryResult → queryResult <$ eventLog dbEvent
+    { action  : "createWithOpts"
     , data    : encode model
     , options : Opt.options options
     , table   : modelName (Proxy :: Proxy model)
@@ -433,8 +434,8 @@ update dbName updateValues whereClause =
       (dbName <> ", update, updVals: " <> encodeJSON [(Opt.options updateValues),(Opt.options whereClause)])
       $ Playback.mkRunDBEntry dbName "update" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action  : "Update"
+  >>= \queryResult → queryResult <$ eventLog dbEvent
+    { action  : "update"
     , query   : Opt.options whereClause
     , data    : Opt.options updateValues
     , table   : modelName (Proxy :: Proxy model)
@@ -453,8 +454,8 @@ update' dbName updateValues whereClause =
       (dbName <> ", update', updVals: " <> encodeJSON [(Opt.options updateValues),(Opt.options whereClause)] )
       $ Playback.mkRunDBEntry dbName "update'" [(Opt.options updateValues),(Opt.options whereClause)] (encode ""))
     id)
-  >>= \queryResult → queryResult <$ eventLog "EventDB"
-    { action  : "Update'"
+  >>= \queryResult → queryResult <$ eventLog dbEvent
+    { action  : "update'"
     , query   : Opt.options whereClause
     , data    : Opt.options updateValues
     , table   : modelName (Proxy :: Proxy model)
@@ -472,8 +473,8 @@ delete dbName options =
       ("dbName: " <> dbName <> ", delete, opts: " <> encodeJSON (Opt.options options))
       $ Playback.mkRunDBEntry dbName "delete" [Opt.options options] (encode ""))
     id)
-  >>= \queryResult -> queryResult <$ eventLog "EventDB"
-    { action  : "Delete"
+  >>= \queryResult -> queryResult <$ eventLog dbEvent
+    { action  : "delete"
     , query   : Opt.options options
     , table   : modelName (Proxy :: Proxy model)
     , success : isRight queryResult
@@ -499,13 +500,13 @@ setCache dbName key value =
       ("dbName: " <> dbName <> ", setCache, key: " <> key <> ", value: " <> value)
       $ Playback.mkRunKVDBEitherEntry dbName "setCache" ("key: " <> key <> ", value: " <> value))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-    { action  : "SetCache"
+  >>= \result → result <$ eventLog cacheEvent
+    { action  : "setCache"
     , key
     , value
     , success : isRight result
     , db      : dbName
-    , result  : fetchDBResult (const $ toForeign "Set successfully") result
+    , result  : fetchDBResult (const $ toForeign "SET SUCCESSFULLY") result
     }
 
 setCacheWithOpts :: forall st rt. String -> String ->  String -> Maybe Milliseconds -> SetOptions -> BackendFlow st rt (Either Error Boolean)
@@ -517,11 +518,11 @@ setCacheWithOpts dbName key value mbTtl opts =
       ("dbName: " <> dbName <> ", setCacheWithOpts, key: " <> key <> ", value: " <> value <> ", opts: " <> (show opts))
       $ Playback.mkRunKVDBEitherEntry dbName "setCacheWithOpts" ("key: " <> key <> ", value: " <> value <> ", opts: " <> (show opts)))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-    { action  : "SetCacheWithOpts"
+  >>= \result → result <$ eventLog cacheEvent
+    { action  : "setCacheWithOpts"
     , key
     , value
-    , ttl     : mbTtl
+    , ttl     : maybe SeqTypes.null (unwrap >>> encode) mbTtl
     , opts
     , success : isRight result
     , db      : dbName
@@ -539,14 +540,14 @@ setCacheWithExpiry dbName key value ttl =
       ("dbName: " <> dbName <> ", setCacheWithExpiry, key: " <> key <> ", value: " <> value <> ", ttl: " <> show ttl)
       $ Playback.mkRunKVDBEitherEntry dbName "setCacheWithExpiry" ("key: " <> key <> ", value: " <> value <> ", ttl: " <> show ttl))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-    { action  : "SetCacheWithExpiry"
+  >>= \result → result <$ eventLog cacheEvent
+    { action  : "setCacheWithExpiry"
     , key
     , value
     , ttl
     , success : isRight result
     , db      : dbName
-    , result  : fetchDBResult (const $ toForeign "Set successfully") result
+    , result  : fetchDBResult (const $ toForeign "SET SUCCESSFULLY") result
     }
 
 getCache :: forall st rt. String -> String -> BackendFlow st rt (Either Error (Maybe String))
@@ -558,8 +559,8 @@ getCache dbName key =
         ("dbName: " <> dbName <> ", getCache, key: " <> key)
         $ Playback.mkRunKVDBEitherEntry dbName "getCache" ("key: " <> key))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-   { action  : "GetCache"
+  >>= \result → result <$ eventLog cacheEvent
+   { action  : "getCache"
    , key
    , success : isRight result
    , db      : dbName
@@ -575,8 +576,8 @@ keyExistsCache dbName key =
       ("dbName: " <> dbName <> ", keyExistsCache, key: " <> key)
       $ Playback.mkRunKVDBEitherEntry dbName "keyExistsCache" ("key: " <> key))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-   { action  : "KeyExistsCache"
+  >>= \result → result <$ eventLog cacheEvent
+   { action  : "keyExistsCache"
    , key
    , success : isRight result
    , db      : dbName
@@ -592,8 +593,8 @@ delCache dbName key =
       ("dbName: " <> dbName <> ", delCache, key: " <> key)
       $ Playback.mkRunKVDBEitherEntry dbName "delCache" ("key: " <> key))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-   { action  : "DelCache"
+  >>= \result → result <$ eventLog cacheEvent
+   { action  : "delCache"
    , key
    , success : isRight result
    , db      : dbName
@@ -609,8 +610,8 @@ expire dbName key ttl =
       ("dbName: " <> dbName <> ", delCache, key: " <> key <> ", ttl: " <> show ttl)
       $ Playback.mkRunKVDBEitherEntry dbName "expire" ("key: " <> key <> ", ttl: " <> show ttl))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-    { action  : "Expire"
+  >>= \result → result <$ eventLog cacheEvent
+    { action  : "expire"
     , key
     , ttl
     , success : isRight result
@@ -627,8 +628,8 @@ incr dbName key =
       ("dbName: " <> dbName <> ", incr, key: " <> key)
       $ Playback.mkRunKVDBEitherEntry dbName "incr" ("key: " <> key))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-   { action  : "Incr"
+  >>= \result → result <$ eventLog cacheEvent
+   { action  : "incr"
    , key
    , success : isRight result
    , db      : dbName
@@ -644,8 +645,8 @@ setHash dbName key field value =
       ("dbName: " <> dbName <> ", setHash, key: " <> key <> ", field: " <> field <> ", value: " <> value)
       $ Playback.mkRunKVDBEitherEntry dbName "setHash" ("key: " <> key <> ", field: " <> field <> ", value: " <> value))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-   { action  : "SetHash"
+  >>= \result → result <$ eventLog cacheEvent
+   { action  : "setHash"
    , key
    , field
    , value
@@ -663,13 +664,13 @@ getHashKey dbName key field =
       ("dbName: " <> dbName <> ", getHashKey, key: " <> key <> ", field: " <> field)
       $ Playback.mkRunKVDBEitherEntry dbName "getHashKey" ("key: " <> key <> ", field: " <> field))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-   { action  : "GetHashKey"
+  >>= \result → result <$ eventLog cacheEvent
+   { action  : "getHashKey"
    , key
    , field
    , success : isRight result
    , db      : dbName
-   , result  : fetchDBResult (maybe (toForeign "Hashkey not found") encode) result
+   , result  : fetchDBResult (maybe (toForeign "HASHKEY NOT FOUND") encode) result
    }
 
 publishToChannel :: forall st rt. String -> String -> String -> BackendFlow st rt (Either Error Int)
@@ -681,8 +682,8 @@ publishToChannel dbName channel message =
       ("dbName: " <> dbName <> ", publishToChannel, channel: " <> channel <> ", message: " <> message)
       $ Playback.mkRunKVDBEitherEntry dbName "publishToChannel" ("channel: " <> channel <> ", message: " <> message))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-   { action  : "PublishToChannel"
+  >>= \result → result <$ eventLog queueEvent
+   { action  : "publishToChannel"
    , channel
    , message
    , success : isRight result
@@ -701,12 +702,12 @@ subscribe dbName channel =
       ("dbName: " <> dbName <> ", subscribe, channel: " <> channel)
       $ Playback.mkRunKVDBEitherEntry dbName "subscribe" ("channel: " <> channel))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-   { action  : "Subscribe"
+  >>= \result → result <$ eventLog queueEvent
+   { action  : "subscribe"
    , channel
    , success : isRight result
    , db      : dbName
-   , result  : fetchDBResult (const $ toForeign "Subscribed successfully") result
+   , result  : fetchDBResult (const $ toForeign "SUBSCRIBED SUCCESSFULLY") result
    }
 
 -- Not sure about this method.
@@ -720,13 +721,13 @@ enqueue dbName listName value =
       ("dbName: " <> dbName <> ", enqueue, listName: " <> listName <> ", value: " <> value)
       $ Playback.mkRunKVDBEitherEntry dbName "enqueue" ("listName: " <> listName <> ", value: " <> value))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-   { action  : "Enqueue"
+  >>= \result → result <$ eventLog queueEvent
+   { action  : "enqueue"
    , list    : listName
    , value
    , success : isRight result
    , db      : dbName
-   , result  : fetchDBResult (const $ toForeign "Enqueued successfully") result
+   , result  : fetchDBResult (const $ toForeign "ENQUEUED SUCCESSFULLY") result
    }
 
 dequeue :: forall st rt. String -> String -> BackendFlow st rt (Either Error (Maybe String))
@@ -738,12 +739,12 @@ dequeue dbName listName =
       ("dbName: " <> dbName <> ", dequeue, listName: " <> listName)
       $ Playback.mkRunKVDBEitherEntry dbName "dequeue" ("listName: " <> listName))
     id)
-  >>= \result → result <$ eventLog "EventKV"
-    { action  : "Dequeue"
+  >>= \result → result <$ eventLog queueEvent
+    { action  : "dequeue"
     , list    : listName
     , success : isRight result
     , db      : dbName
-    , result  : fetchDBResult (maybe (toForeign "Not found") encode) result
+    , result  : fetchDBResult (maybe (toForeign "NOT FOUND") encode) result
     }
 
 getQueueIdx :: forall st rt. String -> String -> Int -> BackendFlow st rt (Either Error (Maybe String))
@@ -761,7 +762,7 @@ getQueueIdx dbName listName index =
     , index
     , success : isRight result
     , db      : dbName
-    , result  : fetchDBResult (maybe (toForeign "Not found") encode) result
+    , result  : fetchDBResult (maybe (toForeign "NOT FOUND") encode) result
     }
 
 -- Multi methods
@@ -776,8 +777,8 @@ newMulti dbName = do
         ("dbName: " <> dbName <> ", newMulti")
         $ Playback.mkRunKVDBSimpleEntry dbName "newMulti" "")
       id
-  result <$ eventLog "EventKVMulti"
-    { action : "NewMulti"
+  result <$ eventLog multiEvent
+    { action : "newMulti"
     , db     : dbName
     , result : encode result
     }
@@ -793,8 +794,8 @@ setCacheInMulti key value multi = do
         ("dbName: " <> dbName <> ", setCacheInMulti, key: " <> key <> ", value: " <> value <> ", multi: " <> show multi)
         $ Playback.mkRunKVDBSimpleEntry dbName "setCacheInMulti" ("key: " <> key <> ", value: " <> value <> ", multi: " <> show multi))
       id
-  result <$ eventLog "EventKVMulti"
-    { action : "SetCacheInMulti"
+  result <$ eventLog multiEvent
+    { action : "setCacheInMulti"
     , key
     , value
     , multi
@@ -989,3 +990,18 @@ encodeE = encodeEWith encode
 
 encodeEWith :: ∀ a b. Encode a ⇒ (b → Foreign) → Either a b → Foreign
 encodeEWith = either encode
+
+apiEvent :: String
+apiEvent = "EventAPI"
+
+dbEvent :: String
+dbEvent = "EventDB"
+
+cacheEvent :: String
+cacheEvent = "EventCache"
+
+queueEvent :: String
+queueEvent = "EventQueue"
+
+multiEvent :: String
+multiEvent = "EventMulti"
