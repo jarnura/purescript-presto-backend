@@ -45,6 +45,7 @@ type InterpreterMT rt st err eff a = R.ReaderT rt (S.StateT st (E.ExceptT err (B
 type InterpreterMT' rt st eff a = InterpreterMT rt st (Tuple Error st) eff a
 
 type LogRunner = forall e a. String -> a -> Aff e Unit
+type EventLogRunner = ∀ e a. String → a → Aff e Unit
 type AffRunner = forall e a. Aff e a -> Aff e a
 
 -- Running mode.
@@ -60,11 +61,12 @@ newtype KVDBRuntime = KVDBRuntime
   }
 
 newtype BackendRuntime = BackendRuntime
-  { apiRunner   :: APIRunner
-  , connections :: StrMap Connection
-  , logRunner   :: LogRunner
-  , affRunner   :: AffRunner
-  , kvdbRuntime :: KVDBRuntime
-  , mode        :: RunningMode
-  , options     :: AVar (StrMap String)
+  { apiRunner      :: APIRunner
+  , connections    :: StrMap Connection
+  , logRunner      :: LogRunner
+  , eventLogRunner :: EventLogRunner
+  , affRunner      :: AffRunner
+  , kvdbRuntime    :: KVDBRuntime
+  , mode           :: RunningMode
+  , options        :: AVar (StrMap String)
   }

@@ -27,34 +27,34 @@ module Presto.Backend.Runtime.Interpreter
 import Prelude
 
 import Control.Monad.Aff (forkAff)
-import Control.Monad.Aff.AVar (AVAR, AVar, makeVar, readVar, takeVar, putVar)
+import Control.Monad.Aff.AVar (makeVar, putVar, readVar, takeVar)
 import Control.Monad.Aff.Class (liftAff)
-import Control.Monad.Eff.Exception (Error, throwException, error)
 import Control.Monad.Eff.Class (liftEff)
+import Control.Monad.Eff.Exception (Error)
 import Control.Monad.Except.Trans (runExceptT) as E
 import Control.Monad.Free (foldFree)
 import Control.Monad.Reader.Trans (ask, lift, runReaderT) as R
 import Control.Monad.State.Trans (get, modify, put, runStateT) as S
 import Data.Exists (runExists)
-import Data.Tuple (Tuple)
-import Data.StrMap as StrMap
-import Data.UUID (genUUID)
 import Data.Maybe (Maybe(..))
+import Data.StrMap as StrMap
+import Data.Tuple (Tuple)
+import Data.UUID (genUUID)
+import Presto.Backend.DB.Mock.Types (DBActionDict)
 import Presto.Backend.Flow (BackendFlow, BackendFlowCommands(..), BackendFlowCommandsWrapper, BackendFlowWrapper(..))
-import Presto.Backend.SystemCommands (runSysCmd)
-import Presto.Backend.Language.Types.EitherEx (fromEitherEx, toEitherEx)
-import Presto.Backend.Language.Types.MaybeEx (fromMaybeEx, toMaybeEx)
-import Presto.Backend.Language.Types.UnitEx (UnitEx(..), fromUnitEx)
 import Presto.Backend.Language.Types.DB (SqlConn(..))
+import Presto.Backend.Language.Types.EitherEx (fromEitherEx)
+import Presto.Backend.Language.Types.MaybeEx (fromMaybeEx, toMaybeEx)
+import Presto.Backend.Language.Types.UnitEx (UnitEx(UnitEx))
+import Presto.Backend.Playback.Entries (mkThrowExceptionEntry)
+import Presto.Backend.Playback.Machine.Classless (withRunModeClassless)
+import Presto.Backend.Playback.Types (PlaybackError(PlaybackError), PlaybackErrorType(ForkedFlowRecordingsMissed), PlayerRuntime, RecorderRuntime, mkEntryDict)
+import Presto.Backend.Runtime.API (runAPIInteraction)
 import Presto.Backend.Runtime.Common (lift3, throwException', getDBConn', getKVDBConn')
+import Presto.Backend.Runtime.KVDBInterpreter (runKVDB)
 import Presto.Backend.Runtime.Types (InterpreterMT, InterpreterMT', BackendRuntime(..), RunningMode(..))
 import Presto.Backend.Runtime.Types as X
-import Presto.Backend.Playback.Machine.Classless (withRunModeClassless)
-import Presto.Backend.Playback.Entries (mkThrowExceptionEntry)
-import Presto.Backend.Playback.Types (RecorderRuntime(..), PlayerRuntime(..), PlaybackError(..), PlaybackErrorType(..), mkEntryDict)
-import Presto.Backend.Runtime.API (runAPIInteraction)
-import Presto.Backend.Runtime.KVDBInterpreter (runKVDB)
-import Presto.Backend.DB.Mock.Types (DBActionDict)
+import Presto.Backend.SystemCommands (runSysCmd)
 
 forkF :: forall eff rt st a. BackendRuntime -> BackendFlow st rt a -> InterpreterMT rt st (Tuple Error st) eff Unit
 forkF brt flow = do
@@ -128,13 +128,14 @@ forkBackendRuntime flowGUID brt@(BackendRuntime rt) = do
   case mbForkedMode of
     Nothing         -> pure Nothing
     Just forkedMode -> pure $ Just $ BackendRuntime
-          { apiRunner   : rt.apiRunner
-          , connections : rt.connections
-          , logRunner   : rt.logRunner
-          , affRunner   : rt.affRunner
-          , kvdbRuntime : rt.kvdbRuntime
-          , mode        : forkedMode
-          , options     : rt.options
+          { apiRunner      : rt.apiRunner
+          , connections    : rt.connections
+          , logRunner      : rt.logRunner
+          , eventLogRunner : rt.eventLogRunner
+          , affRunner      : rt.affRunner
+          , kvdbRuntime    : rt.kvdbRuntime
+          , mode           : forkedMode
+          , options        : rt.options
           }
 
 getMockedDBValue :: forall st rt eff a. BackendRuntime -> DBActionDict -> InterpreterMT' rt st eff a
@@ -190,6 +191,11 @@ interpret brt@(BackendRuntime rt) (Log tag message rrItemDict next) = do
   res <- withRunModeClassless brt rrItemDict
     (lift3 (rt.logRunner tag message) *> pure UnitEx)
   pure $ next res
+
+interpret brt@(BackendRuntime rt) (EventLog tag message rrItemDict next) =
+  next
+    <$> withRunModeClassless brt rrItemDict
+          (lift3 (rt.eventLogRunner tag message) *> pure UnitEx)
 
 interpret brt@(BackendRuntime rt) (Fork flow flowGUID rrItemDict next) = do
   mbForkedRt <- forkBackendRuntime flowGUID brt

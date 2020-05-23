@@ -21,22 +21,21 @@
 
 module Presto.Backend.Playback.Entries where
 
-import Prelude (class Eq, class Show, Unit, bind, pure, unit, ($), (<$>), (<<<), (==))
-import Presto.Backend.Playback.Types (class MockedResult, class RRItem, RecordingEntry(..))
-import Data.Either (Either(Left, Right), either, hush)
-import Data.Foreign.Class (class Encode, class Decode, encode, decode)
-import Data.Foreign (Foreign)
-import Data.Foreign.Generic (decodeJSON, defaultOptions, encodeJSON, genericDecode, genericEncode)
-import Data.Generic.Rep.Show as GShow
-import Data.Generic.Rep (class Generic)
-import Data.Maybe (Maybe(Just, Nothing))
-import Presto.Backend.Types.API (ErrorPayload, ErrorResponse, Response)
-
 import Control.Monad.Except (runExcept) as E
+import Data.Either (Either(Left, Right), either, hush)
+import Data.Foreign (Foreign)
+import Data.Foreign.Class (class Decode, class Encode, decode, encode)
+import Data.Foreign.Generic (decodeJSON, defaultOptions, encodeJSON, genericDecode, genericEncode)
+import Data.Generic.Rep (class Generic)
+import Data.Generic.Rep.Show as GShow
+import Data.Maybe (Maybe(..))
+import Prelude (class Eq, class Show, Unit, bind, pure, unit, ($), (<$>), (<<<), (==))
 import Presto.Backend.Language.Types.DB (DBError, KVDBConn(MockedKVDB, Redis), MockedKVDBConn(MockedKVDBConn), MockedSqlConn(MockedSqlConn), SqlConn(MockedSql, Sequelize))
 import Presto.Backend.Language.Types.EitherEx (EitherEx(..))
 import Presto.Backend.Language.Types.MaybeEx (MaybeEx)
 import Presto.Backend.Language.Types.UnitEx (UnitEx(..))
+import Presto.Backend.Playback.Types (class MockedResult, class RRItem, RecordingEntry(RecordingEntry))
+import Presto.Backend.Types.API (ErrorPayload, ErrorResponse, Response)
 
 data SetOptionEntry = SetOptionEntry
   { key   :: String
@@ -54,6 +53,11 @@ data GenerateGUIDEntry = GenerateGUIDEntry
   }
 
 data LogEntry = LogEntry
+  { tag     :: String
+  , message :: String
+  }
+
+data EventLogEntry = EventLogEntry
   { tag     :: String
   , message :: String
   }
@@ -133,6 +137,9 @@ mkRunSysCmdEntry cmd result = RunSysCmdEntry { cmd, result }
 
 mkLogEntry :: String -> String -> UnitEx -> LogEntry
 mkLogEntry tag message _ = LogEntry { tag, message }
+
+mkEventLogEntry :: String → String → UnitEx → EventLogEntry
+mkEventLogEntry tag message _ = EventLogEntry  { tag, message }
 
 mkThrowExceptionEntry :: String -> UnitEx -> ThrowExceptionEntry
 mkThrowExceptionEntry errorMessage _ = ThrowExceptionEntry { errorMessage }
@@ -289,6 +296,19 @@ instance rrItemLogEntry :: RRItem LogEntry where
 instance mockedResultLogEntry :: MockedResult LogEntry UnitEx where
   parseRRItem _ = Just UnitEx
 
+derive instance genericEventLogEntry :: Generic EventLogEntry _
+derive instance eqEventLogEntry :: Eq EventLogEntry
+instance showEventLogEntry   :: Show EventLogEntry where show = GShow.genericShow
+instance decodeEventLogEntry :: Decode EventLogEntry where decode = genericDecode defaultOptions
+instance encodeEventLogEntry :: Encode EventLogEntry where encode = genericEncode defaultOptions
+
+instance rrItemEventLogEntry :: RRItem EventLogEntry where
+  toRecordingEntry rrItem idx mode = (RecordingEntry idx mode "EventLogEntry") <<< encodeJSON $ rrItem
+  fromRecordingEntry (RecordingEntry idx mode entryName re) = hush $ E.runExcept $ decodeJSON re
+  getTag _ = "EventLogEntry"
+
+instance mockedResultEventLogEntry :: MockedResult EventLogEntry UnitEx where
+  parseRRItem _ = Just UnitEx
 
 derive instance genericForkFlowEntry :: Generic ForkFlowEntry _
 derive instance eqForkFlowEntry :: Eq ForkFlowEntry
@@ -362,10 +382,10 @@ instance mockedResultCallAPIGenericEntry
         RightEx strResp ->
           case E.runExcept $ decode strResp of
             Right (resultEx :: b) → Just $ RightEx $ Right resultEx
-            Left err →
+            Left _ →
               case E.runExcept $ decode strResp of
                 Right (resultEx :: err) → Just  $ RightEx $ Left resultEx
-                Left err → Nothing
+                Left _ → Nothing
 
 derive instance genericRunSysCmdEntry :: Generic RunSysCmdEntry _
 derive instance eqRunSysCmdEntry :: Eq RunSysCmdEntry

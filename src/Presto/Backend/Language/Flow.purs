@@ -37,13 +37,12 @@ import Data.Foreign.Class (class Decode, class Encode, encode)
 import Data.Foreign.Generic (decodeJSON, encodeJSON)
 import Data.Foreign.Generic.Class (class GenericDecode)
 import Data.Generic.Rep (class Generic)
-import Data.Maybe (Maybe(..), isJust, maybe)
+import Data.Maybe (Maybe(Just, Nothing), maybe)
 import Data.Newtype (class Newtype, unwrap)
-import Data.Options (Options, options, tag)
+import Data.Options (Options)
 import Data.Options (options) as Opt
 import Data.String (null)
 import Data.Time.Duration (Milliseconds, Seconds)
-import Node.HTTP.Client (headers)
 import Presto.Backend.APIInteract (apiInteract, apiInteractGeneric)
 import Presto.Backend.DB.Mock.Actions (mkCreate, mkCreateWithOpts, mkDelete, mkFindAll, mkFindOne, mkQuery, mkUpdate) as SqlDBMock
 import Presto.Backend.DB.Mock.Types (DBActionDict, mkDbActionDict) as SqlDBMock
@@ -56,7 +55,7 @@ import Presto.Backend.Language.Types.KVDB (Multi)
 import Presto.Backend.Language.Types.KVDB (getKVDBName) as KVDB
 import Presto.Backend.Language.Types.MaybeEx (MaybeEx)
 import Presto.Backend.Language.Types.UnitEx (UnitEx, fromUnitEx, toUnitEx)
-import Presto.Backend.Playback.Entries (CallAPIEntry, CallAPIGenericEntry, DoAffEntry, ForkFlowEntry, GenerateGUIDEntry, GetDBConnEntry, GetKVDBConnEntry, GetOptionEntry, LogEntry, RunDBEntry, RunKVDBEitherEntry, RunKVDBSimpleEntry, RunSysCmdEntry, SetOptionEntry, mkCallAPIEntry, mkCallAPIGenericEntry, mkDoAffEntry, mkForkFlowEntry, mkGenerateGUIDEntry, mkGetDBConnEntry, mkGetKVDBConnEntry, mkGetOptionEntry, mkLogEntry, mkRunDBEntry, mkRunKVDBEitherEntry, mkRunKVDBSimpleEntry, mkRunSysCmdEntry, mkSetOptionEntry) as Playback
+import Presto.Backend.Playback.Entries (CallAPIEntry, CallAPIGenericEntry, DoAffEntry, EventLogEntry, ForkFlowEntry, GenerateGUIDEntry, GetDBConnEntry, GetKVDBConnEntry, GetOptionEntry, LogEntry, RunDBEntry, RunKVDBEitherEntry, RunKVDBSimpleEntry, RunSysCmdEntry, SetOptionEntry, mkCallAPIEntry, mkCallAPIGenericEntry, mkDoAffEntry, mkEventLogEntry, mkForkFlowEntry, mkGenerateGUIDEntry, mkGetDBConnEntry, mkGetKVDBConnEntry, mkGetOptionEntry, mkLogEntry, mkRunDBEntry, mkRunKVDBEitherEntry, mkRunKVDBSimpleEntry, mkRunSysCmdEntry, mkSetOptionEntry) as Playback
 import Presto.Backend.Playback.Types (RRItemDict, mkEntryDict) as Playback
 import Presto.Backend.Runtime.Common (jsonStringify)
 import Presto.Backend.Types (BackendAff)
@@ -95,6 +94,10 @@ data BackendFlowCommands next st rt s
     | Log String s
         (Playback.RRItemDict Playback.LogEntry UnitEx)
         (UnitEx -> next)
+
+    | EventLog String s
+        (Playback.RRItemDict Playback.EventLogEntry UnitEx)
+        (UnitEx → next)
 
     | Fork (BackendFlow st rt s)
         String
@@ -289,8 +292,15 @@ log tag message = void $ wrap $ Log tag message
       $ Playback.mkLogEntry tag $ jsonStringify message)
     id
 
+-- TODO: this is not a correct solution, jsonStringify is a strange function
+-- that feels hacky.
 eventLog :: forall st rt a. String -> a -> BackendFlow st rt Unit
-eventLog = log
+eventLog tag message = void $ wrap $ EventLog tag message
+  (Playback.mkEntryDict
+    ("tag: " <> tag <> ", message: " <> jsonStringify message)
+    $ Playback.mkEventLogEntry tag $ jsonStringify message)
+  id
+
 
 forkFlow' :: forall st rt a. String -> BackendFlow st rt a -> BackendFlow st rt Unit
 forkFlow' description flow = do
