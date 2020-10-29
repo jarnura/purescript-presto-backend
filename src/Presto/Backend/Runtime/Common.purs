@@ -23,17 +23,18 @@ module Presto.Backend.Runtime.Common where
 
 import Prelude
 
-import Data.Tuple (Tuple(..))
-import Data.Either (Either(..))
-import Data.Maybe (Maybe(..))
-import Data.StrMap (lookup)
 import Control.Monad.Eff.Exception (error)
 import Control.Monad.Except.Trans (ExceptT(..), lift) as E
 import Control.Monad.Reader.Trans (lift) as R
 import Control.Monad.State.Trans (get, lift) as S
-import Presto.Backend.Types (BackendAff)
-import Presto.Backend.Runtime.Types (BackendRuntime(BackendRuntime), Connection(SqlConn, KVDBConn), InterpreterMT')
+import Data.Either (Either(..))
+import Data.Maybe (Maybe(..))
+import Data.StrMap (lookup)
+import Data.Tuple (Tuple(..))
+import Presto.Backend.Language.Types (DBError(..), EitherEx(..))
 import Presto.Backend.Language.Types.DB (KVDBConn, SqlConn)
+import Presto.Backend.Runtime.Types (BackendRuntime(BackendRuntime), Connection(SqlConn, KVDBConn), InterpreterMT')
+import Presto.Backend.Types (BackendAff)
 
 foreign import jsonStringify :: forall a. a -> String
 
@@ -55,10 +56,10 @@ getDBConn' brt@(BackendRuntime rt) dbName = do
     Just (KVDBConn _)      -> throwException' "Found KV DB Connection instead SQL DB Connection."
     _                      -> throwException' "No DB found"
 
-getKVDBConn' :: forall st rt eff. BackendRuntime -> String -> InterpreterMT' rt st eff KVDBConn
+getKVDBConn' :: forall st rt eff. BackendRuntime -> String -> InterpreterMT' rt st eff (EitherEx DBError KVDBConn)
 getKVDBConn' brt@(BackendRuntime rt) dbName = do
   let mbConn = lookup dbName rt.connections
   case mbConn of
-    Just (KVDBConn kvDBConn) -> pure kvDBConn
-    Just (SqlConn _)         -> throwException' "Found SQL DB Connection instead KV DB Connection."
-    _                        -> throwException' "No DB found"
+    Just (KVDBConn kvDBConn) -> pure $ RightEx kvDBConn
+    Just (SqlConn _)         -> pure $ LeftEx $ DBError "Found SQL DB Connection instead KV DB Connection."
+    _                        -> pure $ LeftEx $ DBError "No DB found"

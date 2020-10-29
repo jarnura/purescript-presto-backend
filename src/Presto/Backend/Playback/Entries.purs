@@ -21,22 +21,21 @@
 
 module Presto.Backend.Playback.Entries where
 
-import Prelude (class Eq, class Show, Unit, bind, pure, unit, ($), (<$>), (<<<), (==))
-import Presto.Backend.Playback.Types (class MockedResult, class RRItem, RecordingEntry(..))
-import Data.Either (Either(Left, Right), either, hush)
-import Data.Foreign.Class (class Encode, class Decode, encode, decode)
-import Data.Foreign (Foreign)
-import Data.Foreign.Generic (decodeJSON, defaultOptions, encodeJSON, genericDecode, genericEncode)
-import Data.Generic.Rep.Show as GShow
-import Data.Generic.Rep (class Generic)
-import Data.Maybe (Maybe(Just, Nothing))
-import Presto.Backend.Types.API (ErrorPayload, ErrorResponse, Response)
-
 import Control.Monad.Except (runExcept) as E
+import Data.Either (Either(..), either, hush)
+import Data.Foreign (Foreign)
+import Data.Foreign.Class (class Encode, class Decode, encode, decode)
+import Data.Foreign.Generic (decodeJSON, defaultOptions, encodeJSON, genericDecode, genericEncode)
+import Data.Generic.Rep (class Generic)
+import Data.Generic.Rep.Show as GShow
+import Data.Maybe (Maybe(Just, Nothing))
+import Prelude (class Eq, class Show, Unit, bind, pure, unit, ($), (<$>), (<<<), (==))
 import Presto.Backend.Language.Types.DB (DBError, KVDBConn(MockedKVDB, Redis), MockedKVDBConn(MockedKVDBConn), MockedSqlConn(MockedSqlConn), SqlConn(MockedSql, Sequelize))
 import Presto.Backend.Language.Types.EitherEx (EitherEx(..))
 import Presto.Backend.Language.Types.MaybeEx (MaybeEx)
 import Presto.Backend.Language.Types.UnitEx (UnitEx(..))
+import Presto.Backend.Playback.Types (class MockedResult, class RRItem, RecordingEntry(..))
+import Presto.Backend.Types.API (ErrorPayload, ErrorResponse, Response)
 
 data SetOptionEntry = SetOptionEntry
   { key   :: String
@@ -116,7 +115,7 @@ data RunKVDBSimpleEntry = RunKVDBSimpleEntry
   { dbName     :: String
   , dbMethod   :: String
   , params     :: String
-  , jsonResult :: Foreign
+  , jsonResult :: EitherEx DBError Foreign
   }
 
 mkSetOptionEntry :: String -> String -> UnitEx -> SetOptionEntry
@@ -215,22 +214,23 @@ mkRunKVDBSimpleEntry
   => String
   -> String
   -> String
-  -> b
+  -> EitherEx DBError b
   -> RunKVDBSimpleEntry
 mkRunKVDBSimpleEntry dbName dbMethod params aRes = RunKVDBSimpleEntry
   { dbName
   , dbMethod
   , params
-  , jsonResult : encode aRes
+  , jsonResult : encode <$> aRes
   }
 
 mkGetDBConnEntry :: String -> SqlConn -> GetDBConnEntry
 mkGetDBConnEntry dbName (Sequelize _)          = GetDBConnEntry { dbName, mockedConn : MockedSqlConn dbName }
 mkGetDBConnEntry dbName (MockedSql mockedConn) = GetDBConnEntry { dbName, mockedConn }
 
-mkGetKVDBConnEntry :: String -> KVDBConn -> GetKVDBConnEntry
-mkGetKVDBConnEntry dbName (Redis _)               = GetKVDBConnEntry { dbName, mockedConn : MockedKVDBConn dbName }
-mkGetKVDBConnEntry dbName (MockedKVDB mockedConn) = GetKVDBConnEntry { dbName, mockedConn }
+mkGetKVDBConnEntry :: String -> EitherEx DBError KVDBConn -> GetKVDBConnEntry
+mkGetKVDBConnEntry dbName (RightEx (Redis _))               = GetKVDBConnEntry { dbName, mockedConn : MockedKVDBConn dbName }
+mkGetKVDBConnEntry dbName (RightEx (MockedKVDB mockedConn)) = GetKVDBConnEntry { dbName, mockedConn }
+mkGetKVDBConnEntry dbName (LeftEx err)                      = GetKVDBConnEntry { dbName, mockedConn : MockedKVDBConn dbName}
 
 derive instance genericSetOptionEntry :: Generic SetOptionEntry _
 derive instance eqSetOptionEntry :: Eq SetOptionEntry
@@ -483,5 +483,13 @@ instance rrItemRunKVDBSimpleEntry :: RRItem RunKVDBSimpleEntry where
   fromRecordingEntry (RecordingEntry idx mode entryName re) = hush $ E.runExcept $ decodeJSON re
   getTag   _ = "RunKVDBSimpleEntry"
 
-instance mockedResultRunKVDBSimpleEntry :: Decode b => MockedResult RunKVDBSimpleEntry b where
-    parseRRItem (RunKVDBSimpleEntry r) = hush $ E.runExcept $ decode r.jsonResult
+instance mockedResultRunKVDBSimpleEntry :: Decode b => MockedResult RunKVDBSimpleEntry (EitherEx DBError b) where
+    parseRRItem (RunKVDBSimpleEntry r) = do
+      eResult <- case r.jsonResult of
+        LeftEx  errResp -> Just $ LeftEx errResp
+        RightEx strResp -> do
+            (resultEx :: b) <- hush $ E.runExcept $ decode strResp
+            Just $ RightEx resultEx
+      pure eResult
+
+      {--hush $ E.runExcept $ decode r.jsonResult--}
